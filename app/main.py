@@ -2,6 +2,7 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi_mcp import FastApiMCP
 
 from app.clients import weather_client
 from app.config import settings
@@ -28,4 +29,12 @@ def create_app() -> FastAPI:
     return app
 
 
+# Create the FastAPI app instance
 app = create_app()
+
+# Create an MCP server based on this app
+mcp = FastApiMCP(app)
+
+
+# Mount the MCP server directly to your app
+mcp.mount_http()
