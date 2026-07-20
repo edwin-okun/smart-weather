@@ -8,7 +8,7 @@ TORTOISE_ORM = {
     "connections": {"default": settings.database_url},
     "apps": {
         "models": {
-            "models": ["app.models.weather"],
+            "models": ["app.models.auth", "app.models.weather"],
             "default_connection": "default",
         },
     },

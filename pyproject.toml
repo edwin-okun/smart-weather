@@ -10,5 +10,9 @@ dependencies = [
     "pydantic-settings>=2.14.2",
     "tortoise-orm>=1.1.7",
 ]
+
+[project.scripts]
+smart-weather = "app.cli:main"
+
 [tool.fastapi]
 entrypoint = "app.main:app"

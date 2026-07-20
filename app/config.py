@@ -8,6 +8,8 @@ class Settings(BaseSettings):
     database_url: str = "sqlite://smart_weather.sqlite3"
     generate_db_schemas: bool = True
     weather_client_timeout: float = 10.0
+    access_token_ttl_seconds: int = 900
+    authorization_code_ttl_seconds: int = 300
 
 
 settings = Settings()
