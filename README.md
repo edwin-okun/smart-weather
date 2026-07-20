@@ -27,6 +27,46 @@ View recent saved lookups:
 curl "http://localhost:8000/weather/history"
 ```
 
+### MCP Usage
+
+This app exposes its FastAPI routes as MCP tools through `fastapi-mcp`.
+
+Start the server:
+
+```bash
+uv run fastapi dev
+```
+
+Connect an MCP client to:
+
+```text
+http://localhost:8000/mcp
+```
+
+Available MCP tools are generated from the OpenAPI operation IDs:
+
+- `get_weather` - fetches current weather for a city and saves the successful lookup to SQLite
+- `list_weather_history` - returns recent saved weather lookups from SQLite
+- `health` - returns service health status
+
+`get_weather` parameters:
+
+- `city` - city name, for example `Nairobi`
+- `country_code` - optional ISO 3166-1 alpha-2 country code, defaults to `KE`
+
+`list_weather_history` parameters:
+
+- `limit` - optional number of saved lookups to return, from `1` to `100`, defaults to `20`
+
+The MCP server is mounted in `app/main.py` with:
+
+```python
+mcp = FastApiMCP(app)
+mcp.mount_http()
+```
+
+The default HTTP MCP mount path is `/mcp`.
+
 ### Configuration
 
 Settings are read from environment variables or `.env`.
