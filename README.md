@@ -1,31 +1,71 @@
 # smart-weather
 
-A project created with FastAPI CLI. Uses Layered approach since its small
+`smart-weather` is a small FastAPI service that returns current weather for a
+city, stores successful lookups in SQLite, and exposes the same core operations
+as MCP tools.
 
-The weather endpoint uses Open-Meteo, so no weather API key is required.
-Weather lookups are saved to SQLite using Tortoise ORM.
-Weather API routes require OAuth client-credentials authentication.
+It is intentionally compact, but it includes production-shaped concerns:
+OAuth-style API access, hashed secrets and tokens, scoped permissions, async
+external API calls, persistence, and a layered code structure that is easy to
+review in an interview.
+
+## What It Does
+
+- Finds a city through the Open-Meteo geocoding API.
+- Fetches current weather from Open-Meteo without requiring a weather API key.
+- Saves successful lookups to SQLite with Tortoise ORM.
+- Protects weather routes with short-lived bearer tokens.
+- Supports OAuth client credentials and authorization code with PKCE.
+- Mounts FastAPI routes as MCP tools at `/mcp`.
 
 ## Quick Start
 
-### Start the development server
+### 1. Install Requirements
+
+This project uses `uv` and requires Python `3.14` or newer.
+
+```bash
+uv sync
+```
+
+### 2. Start the API
 
 ```bash
 uv run fastapi dev
 ```
 
-Visit http://localhost:8000
+The API runs at:
 
-Create an API client:
+```text
+http://localhost:8000
+```
+
+Useful public endpoints:
+
+- `GET /health`
+- `GET /docs`
+- `GET /.well-known/oauth-authorization-server`
+
+### 3. Create an API Client
+
+In a second terminal, create a local client:
 
 ```bash
 uv run python -m app.cli create-client --name local-dev
 ```
 
-The command prints a one-time `client_secret`. Store it somewhere safe because
-only its hash is saved.
+The command prints a `client_id` and one-time `client_secret`.
+Save both values locally:
 
-Request an access token:
+```bash
+export CLIENT_ID="paste-client-id-here"
+export CLIENT_SECRET="paste-client-secret-here"
+```
+
+Secrets are stored only as hashes, so the plaintext secret cannot be recovered
+later. Rotate it if it is lost.
+
+### 4. Request an Access Token
 
 ```bash
 curl -X POST "http://localhost:8000/oauth/token" \
@@ -36,38 +76,91 @@ curl -X POST "http://localhost:8000/oauth/token" \
   -d "scope=weather:read weather:history:read"
 ```
 
-Example request:
+Copy the returned `access_token`:
+
+```bash
+export ACCESS_TOKEN="paste-access-token-here"
+```
+
+### 5. Call the Weather API
 
 ```bash
 curl "http://localhost:8000/weather?city=Nairobi" \
   -H "Authorization: Bearer $ACCESS_TOKEN"
 ```
 
-View recent saved lookups:
+View saved lookups:
 
 ```bash
-curl "http://localhost:8000/weather/history" \
+curl "http://localhost:8000/weather/history?limit=10" \
   -H "Authorization: Bearer $ACCESS_TOKEN"
 ```
 
-### Authentication
+## API Overview
 
-This app supports two OAuth flows:
+| Endpoint | Auth | Purpose |
+| --- | --- | --- |
+| `GET /health` | Public | Service health check |
+| `GET /weather?city=Nairobi&country_code=KE` | `weather:read` | Fetch current weather and save the lookup |
+| `GET /weather/history?limit=20` | `weather:history:read` | List recent saved lookups |
+| `GET /authorize` | Public | Start OAuth authorization-code flow with PKCE |
+| `POST /oauth/token` | Public | Exchange client credentials or authorization code for a bearer token |
+| `GET /.well-known/oauth-authorization-server` | Public | OAuth metadata |
+| `/mcp` | Bearer token | MCP endpoint generated from FastAPI routes |
 
-- Client credentials for machine-to-machine API access.
-- Authorization code with PKCE for AI clients and public clients that launch a browser authorization flow.
+## Architecture
 
-Shared behavior:
+The app keeps framework, business, and persistence concerns separated:
 
-- `POST /oauth/token` issues short-lived opaque bearer tokens.
-- `GET /authorize` issues short-lived authorization codes for registered redirect URIs.
-- `GET /.well-known/oauth-authorization-server` exposes OAuth metadata for dynamic clients.
-- `GET /weather` requires the `weather:read` scope.
-- `GET /weather/history` requires the `weather:history:read` scope.
-- `GET /health` remains public for service health checks.
-- Client secrets, access tokens, and authorization codes are stored only as hashes.
+- `app/main.py` wires FastAPI, routers, database lifecycle, and MCP.
+- `app/routers/` contains HTTP route handlers.
+- `app/services/` contains weather and auth business logic.
+- `app/repositories/` contains Tortoise ORM database access.
+- `app/models/` contains database models.
+- `app/schemas/` contains Pydantic request and response models.
+- `app/clients.py` contains the Open-Meteo HTTP client.
+- `app/dependencies.py` contains auth dependencies and scope enforcement.
+- `app/security.py` contains token generation, hashing, and PKCE helpers.
+- `app/cli.py` contains local administration commands.
 
-Create clients with explicit scopes:
+Request flow for `GET /weather`:
+
+```text
+router -> auth dependency -> weather service -> Open-Meteo client
+       -> weather repository -> SQLite -> response schema
+```
+
+## Authentication
+
+Weather routes require bearer tokens issued by `POST /oauth/token`.
+
+Supported OAuth flows:
+
+- Client credentials for machine-to-machine access.
+- Authorization code with PKCE for public clients that launch a browser flow.
+
+Security behavior:
+
+- Client secrets are generated once and stored only as hashes.
+- Access tokens and authorization codes are opaque and stored only as hashes.
+- Access tokens are short lived. The default TTL is `900` seconds.
+- Authorization codes are short lived. The default TTL is `300` seconds.
+- Disabled clients and rotated secrets revoke active tokens for that client.
+
+Available scopes:
+
+- `weather:read`
+- `weather:history:read`
+
+### Client Commands
+
+Create a client with default scopes:
+
+```bash
+uv run python -m app.cli create-client --name partner-service
+```
+
+Create a client with explicit scopes:
 
 ```bash
 uv run python -m app.cli create-client \
@@ -75,6 +168,26 @@ uv run python -m app.cli create-client \
   --scope weather:read \
   --scope weather:history:read
 ```
+
+List clients without exposing secrets:
+
+```bash
+uv run python -m app.cli list-clients
+```
+
+Rotate a client secret and revoke active tokens:
+
+```bash
+uv run python -m app.cli rotate-secret --client-id "$CLIENT_ID"
+```
+
+Disable a client and revoke active tokens:
+
+```bash
+uv run python -m app.cli disable-client --client-id "$CLIENT_ID"
+```
+
+### PKCE Redirect URIs
 
 For VS Code or AI clients that redirect through `https://vscode.dev/redirect`,
 register that exact redirect URI:
@@ -85,9 +198,8 @@ uv run python -m app.cli add-redirect-uri \
   --redirect-uri "https://vscode.dev/redirect"
 ```
 
-For native clients that use a local callback with a random port, register the
-loopback URI without a port. Requests such as `http://127.0.0.1:33418/` will
-match this registered URI:
+For native apps that use a local callback with a random port, register the
+loopback URI without a port:
 
 ```bash
 uv run python -m app.cli add-redirect-uri \
@@ -95,47 +207,12 @@ uv run python -m app.cli add-redirect-uri \
   --redirect-uri "http://127.0.0.1/"
 ```
 
-The authorization-code flow then uses:
+Requests such as `http://127.0.0.1:33418/` will match that registered loopback
+URI.
 
-```text
-GET /authorize?client_id=$CLIENT_ID&response_type=code&redirect_uri=https%3A%2F%2Fvscode.dev%2Fredirect&code_challenge=...&code_challenge_method=S256
-```
+## MCP Usage
 
-The client exchanges the returned `code` with:
-
-```bash
-curl -X POST "http://localhost:8000/oauth/token" \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "grant_type=authorization_code" \
-  -d "client_id=$CLIENT_ID" \
-  -d "code=$CODE" \
-  -d "redirect_uri=https://vscode.dev/redirect" \
-  -d "code_verifier=$CODE_VERIFIER"
-```
-
-Rotate a client secret and revoke its active tokens:
-
-```bash
-uv run python -m app.cli rotate-secret --client-id "$CLIENT_ID"
-```
-
-Disable a client and revoke its active tokens:
-
-```bash
-uv run python -m app.cli disable-client --client-id "$CLIENT_ID"
-```
-
-List clients without revealing secrets:
-
-```bash
-uv run python -m app.cli list-clients
-```
-
-### MCP Usage
-
-This app exposes its FastAPI routes as MCP tools through `fastapi-mcp`.
-
-Start the server:
+Start the FastAPI server:
 
 ```bash
 uv run fastapi dev
@@ -147,76 +224,71 @@ Connect an MCP client to:
 http://localhost:8000/mcp
 ```
 
-The MCP endpoint requires the same bearer token:
+Use the same bearer token as the HTTP API:
 
 ```text
 Authorization: Bearer $ACCESS_TOKEN
 ```
 
-Available MCP tools are generated from the OpenAPI operation IDs:
+Available MCP tools are generated from OpenAPI operation IDs:
 
-- `get_weather` - fetches current weather for a city and saves the successful lookup to SQLite
-- `list_weather_history` - returns recent saved weather lookups from SQLite
-- `health` - returns service health status
+- `get_weather`
+- `list_weather_history`
+- `health`
 
-The token endpoint is intentionally not exposed as an MCP tool because OAuth
-token requests use form encoding.
+The token endpoint is intentionally excluded from MCP because OAuth token
+requests use form encoding.
 
-`get_weather` parameters:
-
-- `city` - city name, for example `Nairobi`
-- `country_code` - optional ISO 3166-1 alpha-2 country code, defaults to `KE`
-
-`list_weather_history` parameters:
-
-- `limit` - optional number of saved lookups to return, from `1` to `100`, defaults to `20`
-
-The MCP server is mounted in `app/main.py` with:
-
-```python
-mcp = FastApiMCP(app)
-mcp.mount_http()
-```
-
-The default HTTP MCP mount path is `/mcp`.
-
-### Configuration
+## Configuration
 
 Settings are read from environment variables or `.env`.
 
-- `APP_NAME` - FastAPI application title
-- `DATABASE_URL` - database connection URL, defaults to `sqlite://smart_weather.sqlite3`
-- `GENERATE_DB_SCHEMAS` - auto-create database tables on startup, defaults to `true`
-- `WEATHER_CLIENT_TIMEOUT` - external weather API timeout in seconds
-- `ACCESS_TOKEN_TTL_SECONDS` - bearer token lifetime, defaults to `900`
-- `AUTHORIZATION_CODE_TTL_SECONDS` - authorization code lifetime, defaults to `300`
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `APP_NAME` | `smart-weather` | FastAPI application title |
+| `DATABASE_URL` | `sqlite://smart_weather.sqlite3` | Database connection URL |
+| `GENERATE_DB_SCHEMAS` | `true` | Auto-create database tables on startup |
+| `WEATHER_CLIENT_TIMEOUT` | `10.0` | Open-Meteo request timeout in seconds |
+| `ACCESS_TOKEN_TTL_SECONDS` | `900` | Bearer token lifetime |
+| `AUTHORIZATION_CODE_TTL_SECONDS` | `300` | Authorization code lifetime |
 
-### Deploy to FastAPI Cloud
+Example local `.env`:
 
-Sign up and log in at https://fastapicloud.com, then deploy with:
+```dotenv
+DATABASE_URL=sqlite://smart_weather.sqlite3
+GENERATE_DB_SCHEMAS=true
+ACCESS_TOKEN_TTL_SECONDS=900
+```
+
+## Development Notes
+
+The project has no required weather API key because Open-Meteo is public.
+
+The default database is a local SQLite file. To use a clean database for local
+experiments, point `DATABASE_URL` at another SQLite path:
+
+```bash
+DATABASE_URL=sqlite:///tmp/smart_weather_dev.sqlite3 uv run fastapi dev
+```
+
+Run the CLI help:
+
+```bash
+uv run python -m app.cli --help
+```
+
+Deploy to FastAPI Cloud:
 
 ```bash
 uv run fastapi deploy
 ```
 
-## Project Structure
+## Interviewer Notes
 
-- `app/main.py` - FastAPI application setup and router wiring
-- `app/routers/` - HTTP route handlers
-- `app/services/` - Application/business logic
-- `app/repositories/` - Database access functions
-- `app/models/` - Tortoise ORM models
-- `app/schemas/` - Pydantic request and response models
-- `app/clients.py` - Shared external HTTP clients
-- `app/security.py` - Token and secret generation/hashing helpers
-- `app/dependencies.py` - FastAPI auth dependencies and scope enforcement
-- `app/permissions.py` - Permission scope constants
-- `app/cli.py` - API client provisioning and lifecycle commands
-- `app/db.py` - Tortoise ORM setup and shutdown
-- `app/config.py` - Environment-backed application settings
-- `pyproject.toml` - Project dependencies
+This project is meant to be easy to inspect quickly:
 
-## Learn More
-
-- [FastAPI Documentation](https://fastapi.tiangolo.com)
-- [FastAPI Cloud](https://fastapicloud.com)
+- The core weather path is small and async end to end.
+- External API access is isolated in `app/clients.py`.
+- Persistence is behind repository functions.
+- Auth logic is explicit, scoped, and testable without being hidden in a third-party provider.
+- MCP support is mounted from the same FastAPI app instead of being a separate service.
