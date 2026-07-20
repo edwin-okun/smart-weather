@@ -1,8 +1,10 @@
 from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
+from app.dependencies import require_scopes
 from app.exceptions import LocationNotFoundError, UpstreamServiceError
+from app.permissions import WEATHER_HISTORY_READ, WEATHER_READ
 from app.schemas.weather import WeatherHistoryItem, WeatherResponse
 from app.services.weather import get_weather_for_city, get_weather_history
 
@@ -18,6 +20,7 @@ router = APIRouter(tags=["weather"])
         "Returns recent successful weather lookups saved in SQLite. "
         "Use this to inspect cached lookup history without calling Open-Meteo."
     ),
+    dependencies=[Depends(require_scopes(WEATHER_HISTORY_READ))],
 )
 async def list_weather_history(
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
@@ -34,6 +37,7 @@ async def list_weather_history(
         "Looks up a city through Open-Meteo, fetches current weather by coordinates, "
         "and stores the successful lookup in SQLite."
     ),
+    dependencies=[Depends(require_scopes(WEATHER_READ))],
 )
 async def get_weather(
     city: Annotated[str, Query(description="Name of the city")],
