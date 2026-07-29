@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class TokenResponse(BaseModel):
@@ -24,3 +24,30 @@ class ApiClientCreated(BaseModel):
     scopes: list[str]
     status: str
     created_at: datetime | None = None
+
+
+class DynamicClientRegistrationRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    redirect_uris: list[str] = Field(min_length=1, max_length=10)
+    client_name: str | None = Field(default=None, max_length=120)
+    grant_types: list[str] = Field(default_factory=lambda: ["authorization_code"])
+    response_types: list[str] = Field(default_factory=lambda: ["code"])
+    token_endpoint_auth_method: str = "none"
+    scope: str | None = None
+
+
+class DynamicClientRegistrationResponse(BaseModel):
+    client_id: str
+    client_id_issued_at: int
+    client_name: str
+    redirect_uris: list[str]
+    grant_types: list[str]
+    response_types: list[str]
+    token_endpoint_auth_method: str
+    scope: str
+
+
+class DynamicClientRegistrationErrorResponse(BaseModel):
+    error: str
+    error_description: str

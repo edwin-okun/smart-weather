@@ -4,12 +4,14 @@ from urllib.parse import urlsplit
 from fastapi import HTTPException, status
 
 from app.config import settings
+from app.permissions import ALL_SCOPES
 from app.repositories.auth import (
     add_redirect_uri_to_client,
     consume_authorization_code,
     create_access_token,
     create_api_client,
     create_authorization_code,
+    create_public_api_client_with_redirect_uris,
     get_access_token_by_hash,
     get_authorization_code_by_hash,
     get_api_client_by_client_id,
@@ -20,7 +22,13 @@ from app.repositories.auth import (
     update_api_client_last_used,
     update_api_client_status,
 )
-from app.schemas.auth import ApiClientCreated, AuthenticatedClient, TokenResponse
+from app.schemas.auth import (
+    ApiClientCreated,
+    AuthenticatedClient,
+    DynamicClientRegistrationRequest,
+    DynamicClientRegistrationResponse,
+    TokenResponse,
+)
 from app.security import (
     generate_access_token,
     generate_authorization_code,
@@ -35,6 +43,19 @@ from app.security import (
 
 
 TOKEN_TYPE = "Bearer"
+SUPPORTED_DYNAMIC_GRANT_TYPES = ["authorization_code"]
+SUPPORTED_DYNAMIC_RESPONSE_TYPES = ["code"]
+PUBLIC_TOKEN_AUTH_METHOD = "none"
+UNUSABLE_CLIENT_SECRET_HASH = "!"
+
+
+class DynamicClientRegistrationError(ValueError):
+    """RFC 7591 registration error safe to expose to clients."""
+
+    def __init__(self, error: str, description: str):
+        super().__init__(description)
+        self.error = error
+        self.description = description
 
 
 def normalize_scopes(scope: str | None) -> list[str]:
@@ -61,6 +82,60 @@ async def register_api_client(name: str, scopes: list[str]) -> ApiClientCreated:
         scopes=list(client.scopes),
         status=client.status,
         created_at=client.created_at,
+    )
+
+
+async def register_dynamic_api_client(
+    registration: DynamicClientRegistrationRequest,
+) -> DynamicClientRegistrationResponse:
+    """Validate and atomically register a public authorization-code client."""
+    redirect_uris = _normalize_and_validate_redirect_uris(
+        registration.redirect_uris
+    )
+    grant_types = sorted(set(registration.grant_types))
+    response_types = sorted(set(registration.response_types))
+
+    if grant_types != SUPPORTED_DYNAMIC_GRANT_TYPES:
+        raise DynamicClientRegistrationError(
+            "invalid_client_metadata",
+            "Only the authorization_code grant type is supported.",
+        )
+    if response_types != SUPPORTED_DYNAMIC_RESPONSE_TYPES:
+        raise DynamicClientRegistrationError(
+            "invalid_client_metadata",
+            "Only the code response type is supported.",
+        )
+    if registration.token_endpoint_auth_method != PUBLIC_TOKEN_AUTH_METHOD:
+        raise DynamicClientRegistrationError(
+            "invalid_client_metadata",
+            "Only public clients using token_endpoint_auth_method none are supported.",
+        )
+
+    try:
+        scopes = _select_scopes(registration.scope, sorted(ALL_SCOPES))
+    except HTTPException as exc:
+        raise DynamicClientRegistrationError(
+            "invalid_client_metadata",
+            "The requested scope contains an unsupported value.",
+        ) from exc
+
+    client_name = (registration.client_name or "").strip() or "Dynamic client"
+    client = await create_public_api_client_with_redirect_uris(
+        client_id=generate_client_id(),
+        client_secret_hash=UNUSABLE_CLIENT_SECRET_HASH,
+        name=client_name,
+        scopes=scopes,
+        redirect_uris=redirect_uris,
+    )
+    return DynamicClientRegistrationResponse(
+        client_id=client.client_id,
+        client_id_issued_at=int(client.created_at.timestamp()),
+        client_name=client.name,
+        redirect_uris=redirect_uris,
+        grant_types=grant_types,
+        response_types=response_types,
+        token_endpoint_auth_method=PUBLIC_TOKEN_AUTH_METHOD,
+        scope=" ".join(scopes),
     )
 
 
@@ -315,6 +390,47 @@ def _redirect_uri_is_allowed(
         _loopback_redirect_uri_matches(registered_redirect_uri, redirect_uri)
         for registered_redirect_uri in registered_redirect_uris
     )
+
+
+def _normalize_and_validate_redirect_uris(redirect_uris: list[str]) -> list[str]:
+    """Return unique RFC 7591 redirect URIs or raise a protocol error."""
+    normalized = list(dict.fromkeys(redirect_uris))
+    if not normalized:
+        raise DynamicClientRegistrationError(
+            "invalid_redirect_uri",
+            "At least one redirect URI is required.",
+        )
+
+    if any(not _is_valid_registration_redirect_uri(uri) for uri in normalized):
+        raise DynamicClientRegistrationError(
+            "invalid_redirect_uri",
+            "Each redirect URI must be absolute, fragment-free, and use HTTPS, "
+            "loopback HTTP, or a private-use scheme.",
+        )
+    return normalized
+
+
+def _is_valid_registration_redirect_uri(redirect_uri: str) -> bool:
+    if not redirect_uri or len(redirect_uri) > 500:
+        return False
+    try:
+        parsed = urlsplit(redirect_uri)
+        parsed.port
+    except ValueError:
+        return False
+
+    if not parsed.scheme or parsed.fragment:
+        return False
+    if parsed.scheme == "https":
+        return bool(parsed.hostname)
+    if parsed.scheme == "http":
+        return _is_loopback_host(parsed.hostname)
+    return parsed.scheme not in {
+        "data",
+        "file",
+        "javascript",
+        "vbscript",
+    } and bool(parsed.path or parsed.netloc)
 
 
 def _loopback_redirect_uri_matches(
