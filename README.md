@@ -178,7 +178,8 @@ The response contains a generated `client_id` and the effective registration
 metadata. Dynamically registered clients are public clients: they receive no
 client secret and use the authorization-code flow with S256 PKCE. Loopback
 redirect URIs registered without a port accept a dynamic port during
-authorization.
+authorization. If `scope` is omitted or blank, the client receives only
+`weather:read`; access to weather history must be requested explicitly.
 
 Registration is intentionally unauthenticated. For an internet-facing
 deployment, protect `/register` with deployment-level rate limiting and

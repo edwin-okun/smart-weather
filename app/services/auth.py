@@ -1,10 +1,11 @@
+import re
 from datetime import timedelta
 from urllib.parse import urlsplit
 
 from fastapi import HTTPException, status
 
 from app.config import settings
-from app.permissions import ALL_SCOPES
+from app.permissions import ALL_SCOPES, WEATHER_READ
 from app.repositories.auth import (
     add_redirect_uri_to_client,
     consume_authorization_code,
@@ -47,6 +48,14 @@ SUPPORTED_DYNAMIC_GRANT_TYPES = ["authorization_code"]
 SUPPORTED_DYNAMIC_RESPONSE_TYPES = ["code"]
 PUBLIC_TOKEN_AUTH_METHOD = "none"
 UNUSABLE_CLIENT_SECRET_HASH = "!"
+PRIVATE_USE_SCHEME_PATTERN = re.compile(
+    r"^[a-z][a-z0-9-]*(?:\.[a-z0-9-]+)+$"
+)
+SUPPORTED_EDITOR_REDIRECT_SCHEMES = {
+    "cursor",
+    "vscode",
+    "vscode-insiders",
+}
 
 
 class DynamicClientRegistrationError(ValueError):
@@ -112,7 +121,12 @@ async def register_dynamic_api_client(
         )
 
     try:
-        scopes = _select_scopes(registration.scope, sorted(ALL_SCOPES))
+        requested_scope = (
+            registration.scope.strip()
+            if registration.scope and registration.scope.strip()
+            else WEATHER_READ
+        )
+        scopes = _select_scopes(requested_scope, sorted(ALL_SCOPES))
     except HTTPException as exc:
         raise DynamicClientRegistrationError(
             "invalid_client_metadata",
@@ -425,12 +439,10 @@ def _is_valid_registration_redirect_uri(redirect_uri: str) -> bool:
         return bool(parsed.hostname)
     if parsed.scheme == "http":
         return _is_loopback_host(parsed.hostname)
-    return parsed.scheme not in {
-        "data",
-        "file",
-        "javascript",
-        "vbscript",
-    } and bool(parsed.path or parsed.netloc)
+    return (
+        parsed.scheme in SUPPORTED_EDITOR_REDIRECT_SCHEMES
+        or PRIVATE_USE_SCHEME_PATTERN.fullmatch(parsed.scheme) is not None
+    ) and bool(parsed.path or parsed.netloc)
 
 
 def _loopback_redirect_uri_matches(

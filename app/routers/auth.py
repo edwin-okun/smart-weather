@@ -23,6 +23,17 @@ from app.services.auth import (
 )
 
 router = APIRouter(tags=["auth"])
+MAX_REGISTRATION_BODY_BYTES = 64 * 1024
+REGISTRATION_REQUEST_BODY_SCHEMA = {
+    "requestBody": {
+        "required": True,
+        "content": {
+            "application/json": {
+                "schema": DynamicClientRegistrationRequest.model_json_schema()
+            }
+        },
+    }
+}
 
 
 @router.get(
@@ -94,6 +105,7 @@ async def oauth_authorization_server_metadata(request: Request):
         "Registers a public authorization-code client using RFC 7591 metadata."
     ),
     responses={400: {"model": DynamicClientRegistrationErrorResponse}},
+    openapi_extra=REGISTRATION_REQUEST_BODY_SCHEMA,
 )
 async def register_client(
     request: Request,
@@ -107,16 +119,16 @@ async def register_client(
         )
 
     try:
-        raw_registration = await request.json()
+        raw_registration = await _read_registration_json(request)
         if not isinstance(raw_registration, dict):
             raise ValueError
         registration = DynamicClientRegistrationRequest.model_validate(
             raw_registration
         )
-    except ValidationError as exc:
+    except ValidationError:
         error = (
             "invalid_redirect_uri"
-            if any(item["loc"][:1] == ("redirect_uris",) for item in exc.errors())
+            if _has_invalid_redirect_metadata(raw_registration)
             else "invalid_client_metadata"
         )
         return _registration_error(
@@ -220,6 +232,32 @@ def _registration_error(error: str, description: str) -> JSONResponse:
     return JSONResponse(
         status_code=status.HTTP_400_BAD_REQUEST,
         content={"error": error, "error_description": description},
+    )
+
+
+async def _read_registration_json(request: Request) -> object:
+    content_length = request.headers.get("content-length")
+    if content_length is not None:
+        try:
+            if int(content_length) > MAX_REGISTRATION_BODY_BYTES:
+                raise ValueError
+        except ValueError:
+            raise ValueError from None
+
+    body = bytearray()
+    async for chunk in request.stream():
+        body.extend(chunk)
+        if len(body) > MAX_REGISTRATION_BODY_BYTES:
+            raise ValueError
+    return json.loads(body)
+
+
+def _has_invalid_redirect_metadata(registration: dict[str, object]) -> bool:
+    redirect_uris = registration.get("redirect_uris")
+    return (
+        not isinstance(redirect_uris, list)
+        or not 1 <= len(redirect_uris) <= 10
+        or any(not isinstance(uri, str) for uri in redirect_uris)
     )
 
 

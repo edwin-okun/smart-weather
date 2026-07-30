@@ -63,7 +63,7 @@ class DynamicClientRegistrationTests(unittest.TestCase):
         self.assertEqual(body["redirect_uris"], ["http://127.0.0.1/callback"])
         self.assertEqual(
             body["scope"],
-            "weather:history:read weather:read",
+            "weather:read",
         )
 
         verifier = "dynamic-registration-verifier-01234567890123456789"
@@ -105,6 +105,13 @@ class DynamicClientRegistrationTests(unittest.TestCase):
         )
         self.assertEqual(token.status_code, 200)
         self.assertEqual(token.json()["scope"], "weather:read")
+        history = self.client.get(
+            "/weather/history",
+            headers={
+                "Authorization": f"Bearer {token.json()['access_token']}"
+            },
+        )
+        self.assertEqual(history.status_code, 403)
 
     def test_invalid_metadata_and_redirects_do_not_create_clients(self) -> None:
         cases = [
@@ -175,6 +182,51 @@ class DynamicClientRegistrationTests(unittest.TestCase):
             "invalid_client_metadata",
         )
 
+    def test_oversized_registration_body_is_rejected_without_persistence(
+        self,
+    ) -> None:
+        response = self.client.post(
+            "/register",
+            content=b'{"padding":"' + (b"x" * (64 * 1024)) + b'"}',
+            headers={"Content-Type": "application/json"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"], "invalid_client_metadata")
+        self.assertEqual(self.client.portal.call(_client_count), 0)
+
+    def test_redirect_scheme_allowlist_supports_known_editor_schemes(self) -> None:
+        for redirect_uri in [
+            "vscode://callback",
+            "vscode-insiders://callback",
+            "cursor://anysphere/oauth",
+            "com.example.weather:/callback",
+        ]:
+            with self.subTest(redirect_uri=redirect_uri):
+                response = self.client.post(
+                    "/register",
+                    json={"redirect_uris": [redirect_uri]},
+                )
+                self.assertEqual(response.status_code, 201, response.text)
+
+        for redirect_uri in [
+            "about:blank",
+            "blob:https://evil.example/x",
+            "intent://evil.example/callback",
+            "view-source:https://evil.example",
+            "ws://evil.example/callback",
+        ]:
+            with self.subTest(redirect_uri=redirect_uri):
+                response = self.client.post(
+                    "/register",
+                    json={"redirect_uris": [redirect_uri]},
+                )
+                self.assertEqual(response.status_code, 400, response.text)
+                self.assertEqual(
+                    response.json()["error"],
+                    "invalid_redirect_uri",
+                )
+
     def test_client_and_redirects_roll_back_together(self) -> None:
         async def create_with_failed_redirects() -> None:
             with patch(
@@ -217,6 +269,17 @@ class DynamicClientRegistrationTests(unittest.TestCase):
 
     def test_registration_is_not_an_mcp_tool(self) -> None:
         self.assertNotIn("register_oauth_client", mcp.operation_map)
+
+    def test_openapi_documents_registration_request_body(self) -> None:
+        operation = self.client.get("/openapi.json").json()["paths"][
+            "/register"
+        ]["post"]
+        request_body = operation["requestBody"]
+
+        self.assertTrue(request_body["required"])
+        schema = request_body["content"]["application/json"]["schema"]
+        self.assertIn("redirect_uris", schema["properties"])
+        self.assertIn("redirect_uris", schema["required"])
 
     def test_public_client_cannot_use_client_credentials(self) -> None:
         registration = self.client.post(
