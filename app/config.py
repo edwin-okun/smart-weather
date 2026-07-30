@@ -10,6 +10,8 @@ class Settings(BaseSettings):
     weather_client_timeout: float = 10.0
     access_token_ttl_seconds: int = 900
     authorization_code_ttl_seconds: int = 300
+    refresh_token_ttl_seconds: int = 2_592_000
+    public_base_url: str | None = None
 
 
 settings = Settings()

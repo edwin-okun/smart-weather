@@ -3,6 +3,7 @@ from app.models.auth import (
     ApiClient,
     ApiClientRedirectUri,
     AuthorizationCode,
+    RefreshToken,
 )
 from app.models.weather import WeatherLookup
 
@@ -11,5 +12,6 @@ __all__ = [
     "ApiClient",
     "ApiClientRedirectUri",
     "AuthorizationCode",
+    "RefreshToken",
     "WeatherLookup",
 ]

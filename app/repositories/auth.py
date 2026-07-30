@@ -8,6 +8,7 @@ from app.models.auth import (
     ApiClient,
     ApiClientRedirectUri,
     AuthorizationCode,
+    RefreshToken,
 )
 
 
@@ -28,7 +29,7 @@ async def create_api_client(
     )
 
 
-async def create_public_api_client_with_redirect_uris(
+async def create_api_client_with_redirect_uris(
     *,
     client_id: str,
     client_secret_hash: str,
@@ -53,6 +54,24 @@ async def create_public_api_client_with_redirect_uris(
             using_db=connection,
         )
         return client
+
+
+async def create_public_api_client_with_redirect_uris(
+    *,
+    client_id: str,
+    client_secret_hash: str,
+    name: str,
+    scopes: list[str],
+    redirect_uris: list[str],
+) -> ApiClient:
+    """Backward-compatible alias for public-client registration callers."""
+    return await create_api_client_with_redirect_uris(
+        client_id=client_id,
+        client_secret_hash=client_secret_hash,
+        name=name,
+        scopes=scopes,
+        redirect_uris=redirect_uris,
+    )
 
 
 async def get_api_client_by_client_id(client_id: str) -> ApiClient | None:
@@ -84,12 +103,14 @@ async def create_access_token(
     client: ApiClient,
     scopes: list[str],
     expires_at: datetime,
+    using_db: BaseDBAsyncClient | None = None,
 ) -> AccessToken:
     return await AccessToken.create(
         token_hash=token_hash,
         client=client,
         scopes=scopes,
         expires_at=expires_at,
+        using_db=using_db,
     )
 
 
@@ -101,6 +122,108 @@ async def revoke_access_tokens_for_client(client: ApiClient, revoked_at: datetim
     return await AccessToken.filter(client=client, revoked_at__isnull=True).update(
         revoked_at=revoked_at
     )
+
+
+async def create_refresh_token(
+    *,
+    token_hash: str,
+    family_id: str,
+    client: ApiClient,
+    scopes: list[str],
+    expires_at: datetime,
+    using_db: BaseDBAsyncClient | None = None,
+) -> RefreshToken:
+    return await RefreshToken.create(
+        token_hash=token_hash,
+        family_id=family_id,
+        client=client,
+        scopes=scopes,
+        expires_at=expires_at,
+        using_db=using_db,
+    )
+
+
+async def get_refresh_token_by_hash(token_hash: str) -> RefreshToken | None:
+    return await RefreshToken.get_or_none(token_hash=token_hash).prefetch_related(
+        "client"
+    )
+
+
+async def revoke_refresh_tokens_for_client(
+    client: ApiClient,
+    revoked_at: datetime,
+) -> int:
+    return await RefreshToken.filter(
+        client=client,
+        revoked_at__isnull=True,
+    ).update(revoked_at=revoked_at)
+
+
+async def rotate_refresh_token(
+    *,
+    current_token_hash: str,
+    new_token_hash: str,
+    access_token_hash: str,
+    scopes: list[str],
+    access_expires_at: datetime,
+    refresh_expires_at: datetime,
+    rotated_at: datetime,
+) -> tuple[str, RefreshToken | None]:
+    """Atomically consume one refresh token and create its replacements."""
+    async with in_transaction() as connection:
+        current = (
+            await RefreshToken.filter(token_hash=current_token_hash)
+            .using_db(connection)
+            .select_for_update()
+            .prefetch_related("client")
+            .first()
+        )
+        if current is None:
+            return "invalid", None
+        if current.consumed_at is not None or current.revoked_at is not None:
+            await RefreshToken.filter(
+                family_id=current.family_id,
+                revoked_at__isnull=True,
+            ).using_db(connection).update(revoked_at=rotated_at)
+            await AccessToken.filter(
+                client=current.client,
+                revoked_at__isnull=True,
+            ).using_db(connection).update(revoked_at=rotated_at)
+            return "replayed", None
+        if current.expires_at <= rotated_at:
+            return "expired", None
+
+        consumed = await RefreshToken.filter(
+            token_hash=current_token_hash,
+            consumed_at__isnull=True,
+            revoked_at__isnull=True,
+        ).using_db(connection).update(consumed_at=rotated_at)
+        if consumed == 0:
+            await RefreshToken.filter(
+                family_id=current.family_id,
+                revoked_at__isnull=True,
+            ).using_db(connection).update(revoked_at=rotated_at)
+            await AccessToken.filter(
+                client=current.client,
+                revoked_at__isnull=True,
+            ).using_db(connection).update(revoked_at=rotated_at)
+            return "replayed", None
+        await create_access_token(
+            token_hash=access_token_hash,
+            client=current.client,
+            scopes=scopes,
+            expires_at=access_expires_at,
+            using_db=connection,
+        )
+        replacement = await create_refresh_token(
+            token_hash=new_token_hash,
+            family_id=current.family_id,
+            client=current.client,
+            scopes=scopes,
+            expires_at=refresh_expires_at,
+            using_db=connection,
+        )
+        return "rotated", replacement
 
 
 async def add_redirect_uri_to_client(

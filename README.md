@@ -17,6 +17,7 @@ review in an interview.
 - Protects weather routes with short-lived bearer tokens.
 - Supports OAuth client credentials, authorization code with PKCE, and
   RFC 7591 Dynamic Client Registration.
+- Publishes RFC 9728 MCP resource metadata and rotates opaque refresh tokens.
 - Mounts FastAPI routes as MCP tools at `/mcp`.
 
 ## Quick Start
@@ -46,6 +47,7 @@ Useful public endpoints:
 - `GET /health`
 - `GET /docs`
 - `GET /.well-known/oauth-authorization-server`
+- `GET /.well-known/oauth-protected-resource/mcp`
 - `POST /register`
 
 ### 3. Create an API Client
@@ -106,9 +108,10 @@ curl "http://localhost:8000/weather/history?limit=10" \
 | `GET /weather?city=Nairobi&country_code=KE` | `weather:read` | Fetch current weather and save the lookup |
 | `GET /weather/history?limit=20` | `weather:history:read` | List recent saved lookups |
 | `GET /authorize` | Public | Start OAuth authorization-code flow with PKCE |
-| `POST /register` | Public | Dynamically register a public PKCE client |
+| `POST /register` | Public | Dynamically register an OAuth PKCE client |
 | `POST /oauth/token` | Public | Exchange client credentials or authorization code for a bearer token |
 | `GET /.well-known/oauth-authorization-server` | Public | OAuth metadata |
+| `GET /.well-known/oauth-protected-resource/mcp` | Public | MCP resource metadata |
 | `/mcp` | Bearer token | MCP endpoint generated from FastAPI routes |
 
 ## Architecture
@@ -141,6 +144,7 @@ Supported OAuth flows:
 
 - Client credentials for machine-to-machine access.
 - Authorization code with PKCE for public clients that launch a browser flow.
+- Refresh-token rotation for authorization-code clients.
 
 Security behavior:
 
@@ -175,11 +179,31 @@ curl -X POST "http://localhost:8000/register" \
 ```
 
 The response contains a generated `client_id` and the effective registration
-metadata. Dynamically registered clients are public clients: they receive no
-client secret and use the authorization-code flow with S256 PKCE. Loopback
-redirect URIs registered without a port accept a dynamic port during
-authorization. If `scope` is omitted or blank, the client receives only
-`weather:read`; access to weather history must be requested explicitly.
+metadata. Registrations using `token_endpoint_auth_method: none` are public and
+receive no client secret. Registrations using `client_secret_post` or
+`client_secret_basic` are confidential and receive a one-time client secret.
+All authorization-code clients use S256 PKCE. Loopback redirect URIs registered
+without a port accept a dynamic port during authorization. If `scope` is
+omitted or blank, the client receives only `weather:read`; access to weather
+history must be requested explicitly.
+
+OpenWebUI-compatible registration may request:
+
+```json
+{
+  "client_name": "Open WebUI",
+  "redirect_uris": ["http://localhost:3000/oauth/clients/example/callback"],
+  "grant_types": ["authorization_code", "refresh_token"],
+  "response_types": ["code"],
+  "token_endpoint_auth_method": "client_secret_post",
+  "scope": "weather:read"
+}
+```
+
+Authorization-code exchanges return both an access token and a refresh token.
+Refresh tokens are opaque, stored only as hashes, single use, and rotated on
+every successful `grant_type=refresh_token` request. Replaying an old refresh
+token revokes its active token family.
 
 Registration is intentionally unauthenticated. For an internet-facing
 deployment, protect `/register` with deployment-level rate limiting and
@@ -285,6 +309,8 @@ Settings are read from environment variables or `.env`.
 | `WEATHER_CLIENT_TIMEOUT` | `10.0` | Open-Meteo request timeout in seconds |
 | `ACCESS_TOKEN_TTL_SECONDS` | `900` | Bearer token lifetime |
 | `AUTHORIZATION_CODE_TTL_SECONDS` | `300` | Authorization code lifetime |
+| `REFRESH_TOKEN_TTL_SECONDS` | `2592000` | Rotating refresh token lifetime |
+| `PUBLIC_BASE_URL` | unset | Trusted external OAuth origin when deployed behind a proxy |
 
 Example local `.env`:
 
@@ -292,6 +318,8 @@ Example local `.env`:
 DATABASE_URL=sqlite://smart_weather.sqlite3
 GENERATE_DB_SCHEMAS=true
 ACCESS_TOKEN_TTL_SECONDS=900
+REFRESH_TOKEN_TTL_SECONDS=2592000
+PUBLIC_BASE_URL=https://weather.example.com
 ```
 
 ## Development Notes

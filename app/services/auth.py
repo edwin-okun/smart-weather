@@ -11,14 +11,18 @@ from app.repositories.auth import (
     consume_authorization_code,
     create_access_token,
     create_api_client,
+    create_api_client_with_redirect_uris,
     create_authorization_code,
-    create_public_api_client_with_redirect_uris,
+    create_refresh_token,
     get_access_token_by_hash,
     get_authorization_code_by_hash,
     get_api_client_by_client_id,
+    get_refresh_token_by_hash,
     list_redirect_uris_for_client,
     list_api_clients,
     revoke_access_tokens_for_client,
+    revoke_refresh_tokens_for_client,
+    rotate_refresh_token,
     update_api_client_secret_hash,
     update_api_client_last_used,
     update_api_client_status,
@@ -35,6 +39,8 @@ from app.security import (
     generate_authorization_code,
     generate_client_id,
     generate_client_secret,
+    generate_refresh_token,
+    generate_token_family_id,
     hash_secret,
     hash_token,
     utc_now,
@@ -44,10 +50,18 @@ from app.security import (
 
 
 TOKEN_TYPE = "Bearer"
-SUPPORTED_DYNAMIC_GRANT_TYPES = ["authorization_code"]
+SUPPORTED_DYNAMIC_GRANT_TYPE_SETS = {
+    frozenset({"authorization_code"}),
+    frozenset({"authorization_code", "refresh_token"}),
+}
 SUPPORTED_DYNAMIC_RESPONSE_TYPES = ["code"]
 PUBLIC_TOKEN_AUTH_METHOD = "none"
+CONFIDENTIAL_TOKEN_AUTH_METHODS = {
+    "client_secret_basic",
+    "client_secret_post",
+}
 UNUSABLE_CLIENT_SECRET_HASH = "!"
+DYNAMIC_CLIENT_SECRET_HASH_PREFIX = "dcr:"
 PRIVATE_USE_SCHEME_PATTERN = re.compile(
     r"^[a-z][a-z0-9-]*(?:\.[a-z0-9-]+)+$"
 )
@@ -97,27 +111,30 @@ async def register_api_client(name: str, scopes: list[str]) -> ApiClientCreated:
 async def register_dynamic_api_client(
     registration: DynamicClientRegistrationRequest,
 ) -> DynamicClientRegistrationResponse:
-    """Validate and atomically register a public authorization-code client."""
+    """Validate and atomically register a public or confidential OAuth client."""
     redirect_uris = _normalize_and_validate_redirect_uris(
         registration.redirect_uris
     )
     grant_types = sorted(set(registration.grant_types))
     response_types = sorted(set(registration.response_types))
 
-    if grant_types != SUPPORTED_DYNAMIC_GRANT_TYPES:
+    if frozenset(grant_types) not in SUPPORTED_DYNAMIC_GRANT_TYPE_SETS:
         raise DynamicClientRegistrationError(
             "invalid_client_metadata",
-            "Only the authorization_code grant type is supported.",
+            "Supported grants are authorization_code with optional refresh_token.",
         )
     if response_types != SUPPORTED_DYNAMIC_RESPONSE_TYPES:
         raise DynamicClientRegistrationError(
             "invalid_client_metadata",
             "Only the code response type is supported.",
         )
-    if registration.token_endpoint_auth_method != PUBLIC_TOKEN_AUTH_METHOD:
+    if registration.token_endpoint_auth_method not in {
+        PUBLIC_TOKEN_AUTH_METHOD,
+        *CONFIDENTIAL_TOKEN_AUTH_METHODS,
+    }:
         raise DynamicClientRegistrationError(
             "invalid_client_metadata",
-            "Only public clients using token_endpoint_auth_method none are supported.",
+            "Unsupported token endpoint authentication method.",
         )
 
     try:
@@ -134,9 +151,18 @@ async def register_dynamic_api_client(
         ) from exc
 
     client_name = (registration.client_name or "").strip() or "Dynamic client"
-    client = await create_public_api_client_with_redirect_uris(
+    client_secret = (
+        None
+        if registration.token_endpoint_auth_method == PUBLIC_TOKEN_AUTH_METHOD
+        else generate_client_secret()
+    )
+    client = await create_api_client_with_redirect_uris(
         client_id=generate_client_id(),
-        client_secret_hash=UNUSABLE_CLIENT_SECRET_HASH,
+        client_secret_hash=(
+            UNUSABLE_CLIENT_SECRET_HASH
+            if client_secret is None
+            else f"{DYNAMIC_CLIENT_SECRET_HASH_PREFIX}{hash_secret(client_secret)}"
+        ),
         name=client_name,
         scopes=scopes,
         redirect_uris=redirect_uris,
@@ -148,8 +174,10 @@ async def register_dynamic_api_client(
         redirect_uris=redirect_uris,
         grant_types=grant_types,
         response_types=response_types,
-        token_endpoint_auth_method=PUBLIC_TOKEN_AUTH_METHOD,
+        token_endpoint_auth_method=registration.token_endpoint_auth_method,
         scope=" ".join(scopes),
+        client_secret=client_secret,
+        client_secret_expires_at=0 if client_secret is not None else None,
     )
 
 
@@ -161,8 +189,12 @@ async def rotate_api_client_secret(client_id: str) -> ApiClientCreated:
 
     client_secret = generate_client_secret()
     now = utc_now()
-    await update_api_client_secret_hash(client, hash_secret(client_secret))
+    secret_hash = hash_secret(client_secret)
+    if client.client_secret_hash.startswith(DYNAMIC_CLIENT_SECRET_HASH_PREFIX):
+        secret_hash = f"{DYNAMIC_CLIENT_SECRET_HASH_PREFIX}{secret_hash}"
+    await update_api_client_secret_hash(client, secret_hash)
     await revoke_access_tokens_for_client(client, now)
+    await revoke_refresh_tokens_for_client(client, now)
 
     return ApiClientCreated(
         client_id=client.client_id,
@@ -182,7 +214,9 @@ async def disable_api_client(client_id: str) -> int:
 
     now = utc_now()
     await update_api_client_status(client, "disabled")
-    return await revoke_access_tokens_for_client(client, now)
+    access_count = await revoke_access_tokens_for_client(client, now)
+    await revoke_refresh_tokens_for_client(client, now)
+    return access_count
 
 
 async def list_registered_api_clients() -> list[dict[str, object]]:
@@ -284,7 +318,11 @@ async def issue_client_credentials_token(
         )
 
     client = await get_api_client_by_client_id(client_id)
-    if client is None or not verify_secret(client_secret, client.client_secret_hash):
+    if (
+        client is None
+        or client.client_secret_hash.startswith(DYNAMIC_CLIENT_SECRET_HASH_PREFIX)
+        or not verify_secret(client_secret, client.client_secret_hash)
+    ):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="invalid_client",
@@ -311,6 +349,7 @@ async def issue_authorization_code_token(
     code: str,
     redirect_uri: str,
     code_verifier: str,
+    client_secret: str | None,
 ) -> TokenResponse:
     """Exchange a valid authorization code and PKCE verifier for a bearer token."""
     if grant_type != "authorization_code":
@@ -333,6 +372,12 @@ async def issue_authorization_code_token(
             detail="invalid_grant",
         )
 
+    await _authenticate_token_client(
+        client_id=client_id,
+        client_secret=client_secret,
+        client=authorization_code.client,
+    )
+
     if authorization_code.code_challenge_method != "S256" or not verify_pkce_s256(
         code_verifier,
         authorization_code.code_challenge,
@@ -346,10 +391,99 @@ async def issue_authorization_code_token(
     effective_scopes = sorted(
         set(authorization_code.scopes) & set(authorization_code.client.scopes)
     )
-    return await _issue_access_token(
+    return await _issue_access_and_refresh_token(
         client=authorization_code.client,
         scopes=effective_scopes,
     )
+
+
+async def issue_refresh_token(
+    *,
+    client_id: str,
+    client_secret: str | None,
+    refresh_token: str,
+    scope: str | None,
+) -> TokenResponse:
+    """Rotate a refresh token and issue a new access-token pair."""
+    stored_token = await get_refresh_token_by_hash(hash_token(refresh_token))
+    if stored_token is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="invalid_grant",
+        )
+
+    client = await _authenticate_token_client(
+        client_id=client_id,
+        client_secret=client_secret,
+        client=stored_token.client,
+    )
+    allowed_scopes = sorted(
+        set(stored_token.scopes) & set(client.scopes)
+    )
+    requested_scopes = _select_scopes(scope, allowed_scopes)
+    access_token = generate_access_token()
+    replacement_token = generate_refresh_token()
+    now = utc_now()
+    rotation_status, _ = await rotate_refresh_token(
+        current_token_hash=hash_token(refresh_token),
+        new_token_hash=hash_token(replacement_token),
+        access_token_hash=hash_token(access_token),
+        scopes=requested_scopes,
+        access_expires_at=now
+        + timedelta(seconds=settings.access_token_ttl_seconds),
+        refresh_expires_at=now
+        + timedelta(seconds=settings.refresh_token_ttl_seconds),
+        rotated_at=now,
+    )
+    if rotation_status != "rotated":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="invalid_grant",
+        )
+
+    await update_api_client_last_used(client, now)
+    return TokenResponse(
+        access_token=access_token,
+        expires_in=settings.access_token_ttl_seconds,
+        scope=" ".join(requested_scopes),
+        refresh_token=replacement_token,
+    )
+
+
+async def _authenticate_token_client(
+    *,
+    client_id: str,
+    client_secret: str | None,
+    client,
+):
+    """Authenticate public or confidential clients for token grants."""
+    if client.client_id != client_id or client.status != "active":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="invalid_client",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+
+    is_public = client.client_secret_hash == UNUSABLE_CLIENT_SECRET_HASH
+    if is_public:
+        if client_secret is not None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="invalid_client",
+                headers={"WWW-Authenticate": "Basic"},
+            )
+        return client
+
+    stored_secret_hash = client.client_secret_hash.removeprefix(
+        DYNAMIC_CLIENT_SECRET_HASH_PREFIX
+    )
+    if client_secret is None or not verify_secret(client_secret, stored_secret_hash):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="invalid_client",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+    return client
 
 
 async def authenticate_bearer_token(token: str) -> AuthenticatedClient:
@@ -499,4 +633,35 @@ async def _issue_access_token(*, client, scopes: list[str]) -> TokenResponse:
         access_token=token,
         expires_in=expires_in,
         scope=" ".join(scopes),
+    )
+
+
+async def _issue_access_and_refresh_token(
+    *,
+    client,
+    scopes: list[str],
+) -> TokenResponse:
+    """Issue an access token and initial opaque refresh token."""
+    access_token = generate_access_token()
+    refresh_token = generate_refresh_token()
+    now = utc_now()
+    await create_access_token(
+        token_hash=hash_token(access_token),
+        client=client,
+        scopes=scopes,
+        expires_at=now + timedelta(seconds=settings.access_token_ttl_seconds),
+    )
+    await create_refresh_token(
+        token_hash=hash_token(refresh_token),
+        family_id=generate_token_family_id(),
+        client=client,
+        scopes=scopes,
+        expires_at=now + timedelta(seconds=settings.refresh_token_ttl_seconds),
+    )
+    await update_api_client_last_used(client, now)
+    return TokenResponse(
+        access_token=access_token,
+        expires_in=settings.access_token_ttl_seconds,
+        scope=" ".join(scopes),
+        refresh_token=refresh_token,
     )

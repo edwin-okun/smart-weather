@@ -8,6 +8,7 @@ from fastapi import APIRouter, Form, Header, HTTPException, Query, Request, stat
 from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import ValidationError
 
+from app.config import settings
 from app.schemas.auth import (
     DynamicClientRegistrationErrorResponse,
     DynamicClientRegistrationRequest,
@@ -19,6 +20,7 @@ from app.services.auth import (
     create_authorization_code_redirect,
     issue_authorization_code_token,
     issue_client_credentials_token,
+    issue_refresh_token,
     register_dynamic_api_client,
 )
 
@@ -46,6 +48,7 @@ REGISTRATION_REQUEST_BODY_SCHEMA = {
     ),
 )
 async def authorize(
+    request: Request,
     client_id: Annotated[str, Query()],
     response_type: Annotated[str, Query()],
     redirect_uri: Annotated[str, Query()],
@@ -53,8 +56,10 @@ async def authorize(
     code_challenge_method: Annotated[str, Query()],
     scope: Annotated[str | None, Query()] = None,
     state: Annotated[str | None, Query()] = None,
+    resource: Annotated[str | None, Query()] = None,
 ):
     """Validate an OAuth authorization request and redirect with a one-time code."""
+    _validate_resource(request, resource)
     code, _ = await create_authorization_code_redirect(
         client_id=client_id,
         response_type=response_type,
@@ -77,14 +82,18 @@ async def authorize(
 )
 async def oauth_authorization_server_metadata(request: Request):
     """Expose OAuth metadata used by dynamic authorization clients."""
-    base_url = str(request.base_url).rstrip("/")
+    base_url = _public_base_url(request)
     return {
         "issuer": base_url,
         "authorization_endpoint": f"{base_url}/authorize",
         "token_endpoint": f"{base_url}/oauth/token",
         "registration_endpoint": f"{base_url}/register",
         "response_types_supported": ["code"],
-        "grant_types_supported": ["authorization_code", "client_credentials"],
+        "grant_types_supported": [
+            "authorization_code",
+            "refresh_token",
+            "client_credentials",
+        ],
         "code_challenge_methods_supported": ["S256"],
         "token_endpoint_auth_methods_supported": [
             "client_secret_basic",
@@ -95,14 +104,36 @@ async def oauth_authorization_server_metadata(request: Request):
     }
 
 
+@router.get(
+    "/.well-known/oauth-protected-resource",
+    operation_id="oauth_protected_resource_metadata",
+    include_in_schema=False,
+)
+@router.get(
+    "/.well-known/oauth-protected-resource/mcp",
+    operation_id="oauth_protected_resource_metadata_mcp",
+    include_in_schema=False,
+)
+async def oauth_protected_resource_metadata(request: Request):
+    """Expose RFC 9728 metadata for the protected MCP resource."""
+    base_url = _public_base_url(request)
+    return {
+        "resource": f"{base_url}/mcp",
+        "authorization_servers": [base_url],
+        "scopes_supported": ["weather:read"],
+        "bearer_methods_supported": ["header"],
+    }
+
+
 @router.post(
     "/register",
     response_model=DynamicClientRegistrationResponse,
+    response_model_exclude_none=True,
     status_code=status.HTTP_201_CREATED,
     operation_id="register_oauth_client",
     summary="Dynamically register an OAuth client",
     description=(
-        "Registers a public authorization-code client using RFC 7591 metadata."
+        "Registers a public or confidential OAuth client using RFC 7591 metadata."
     ),
     responses={400: {"model": DynamicClientRegistrationErrorResponse}},
     openapi_extra=REGISTRATION_REQUEST_BODY_SCHEMA,
@@ -150,11 +181,13 @@ async def register_client(
 @router.post(
     "/oauth/token",
     response_model=TokenResponse,
+    response_model_exclude_none=True,
     operation_id="issue_oauth_token",
     summary="Issue an OAuth access token",
     description="Issues short-lived bearer tokens using the client credentials grant.",
 )
 async def issue_token(
+    request: Request,
     grant_type: Annotated[str, Form()],
     scope: Annotated[str | None, Form()] = None,
     client_id: Annotated[str | None, Form()] = None,
@@ -162,9 +195,12 @@ async def issue_token(
     code: Annotated[str | None, Form()] = None,
     redirect_uri: Annotated[str | None, Form()] = None,
     code_verifier: Annotated[str | None, Form()] = None,
+    refresh_token: Annotated[str | None, Form()] = None,
+    resource: Annotated[str | None, Form()] = None,
     authorization: Annotated[str | None, Header()] = None,
 ):
     """Issue access tokens for client-credentials and PKCE authorization-code grants."""
+    _validate_resource(request, resource)
     basic_client_id, basic_client_secret = _parse_basic_auth(authorization)
 
     if grant_type == "client_credentials":
@@ -182,9 +218,11 @@ async def issue_token(
         )
 
     if grant_type == "authorization_code":
-        resolved_client_id = _resolve_public_client_id(
+        resolved_client_id, resolved_client_secret = _resolve_token_credentials(
             body_client_id=client_id,
+            body_client_secret=client_secret,
             basic_client_id=basic_client_id,
+            basic_client_secret=basic_client_secret,
         )
         if not code or not redirect_uri or not code_verifier:
             raise HTTPException(
@@ -198,6 +236,26 @@ async def issue_token(
             code=code,
             redirect_uri=redirect_uri,
             code_verifier=code_verifier,
+            client_secret=resolved_client_secret,
+        )
+
+    if grant_type == "refresh_token":
+        resolved_client_id, resolved_client_secret = _resolve_token_credentials(
+            body_client_id=client_id,
+            body_client_secret=client_secret,
+            basic_client_id=basic_client_id,
+            basic_client_secret=basic_client_secret,
+        )
+        if not refresh_token:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="invalid_request",
+            )
+        return await issue_refresh_token(
+            client_id=resolved_client_id,
+            client_secret=resolved_client_secret,
+            refresh_token=refresh_token,
+            scope=scope,
         )
 
     raise HTTPException(
@@ -225,7 +283,7 @@ def _parse_basic_auth(authorization: str | None) -> tuple[str | None, str | None
             headers={"WWW-Authenticate": "Basic"},
         ) from None
 
-    return unquote_plus(client_id), unquote_plus(client_secret)
+    return unquote_plus(client_id), unquote_plus(client_secret) or None
 
 
 def _registration_error(error: str, description: str) -> JSONResponse:
@@ -293,26 +351,48 @@ def _resolve_client_secret_credentials(
     return client_id, client_secret
 
 
-def _resolve_public_client_id(
+def _resolve_token_credentials(
     *,
     body_client_id: str | None,
+    body_client_secret: str | None,
     basic_client_id: str | None,
-) -> str:
-    """Resolve the client ID for PKCE public clients without requiring a secret."""
-    if body_client_id and basic_client_id and body_client_id != basic_client_id:
+    basic_client_secret: str | None,
+) -> tuple[str, str | None]:
+    """Resolve public or confidential credentials for token grants."""
+    if (
+        body_client_id
+        and basic_client_id
+        and body_client_id != basic_client_id
+    ) or (body_client_secret is not None and basic_client_secret):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="invalid_request",
         )
 
-    client_id = body_client_id or basic_client_id
+    client_id = basic_client_id or body_client_id
+    client_secret = basic_client_secret or body_client_secret or None
     if not client_id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="invalid_request",
         )
 
-    return client_id
+    return client_id, client_secret
+
+
+def _validate_resource(request: Request, resource: str | None) -> None:
+    if resource is None:
+        return
+    expected_resource = f"{_public_base_url(request)}/mcp"
+    if resource != expected_resource:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="invalid_target",
+        )
+
+
+def _public_base_url(request: Request) -> str:
+    return (settings.public_base_url or str(request.base_url)).rstrip("/")
 
 
 def _add_query_params(url: str, params: dict[str, str | None]) -> str:
