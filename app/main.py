@@ -36,10 +36,14 @@ def create_app() -> FastAPI:
 app = create_app()
 
 # Create an MCP server based on this app.
-# The OAuth token endpoint uses form encoding, so keep token issuance on HTTP.
+# OAuth protocol endpoints stay on HTTP and are not exposed as weather tools.
 mcp = FastApiMCP(
     app,
-    exclude_operations=["authorize_oauth_client", "issue_oauth_token"],
+    exclude_operations=[
+        "authorize_oauth_client",
+        "issue_oauth_token",
+        "register_oauth_client",
+    ],
     auth_config=AuthConfig(dependencies=[Depends(get_current_client)]),
 )
 

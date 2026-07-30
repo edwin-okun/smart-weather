@@ -1,5 +1,8 @@
 from datetime import datetime
 
+from tortoise.backends.base.client import BaseDBAsyncClient
+from tortoise.transactions import in_transaction
+
 from app.models.auth import (
     AccessToken,
     ApiClient,
@@ -14,13 +17,42 @@ async def create_api_client(
     client_secret_hash: str,
     name: str,
     scopes: list[str],
+    using_db: BaseDBAsyncClient | None = None,
 ) -> ApiClient:
     return await ApiClient.create(
         client_id=client_id,
         client_secret_hash=client_secret_hash,
         name=name,
         scopes=scopes,
+        using_db=using_db,
     )
+
+
+async def create_public_api_client_with_redirect_uris(
+    *,
+    client_id: str,
+    client_secret_hash: str,
+    name: str,
+    scopes: list[str],
+    redirect_uris: list[str],
+) -> ApiClient:
+    """Persist a public client and all redirects in one transaction."""
+    async with in_transaction() as connection:
+        client = await create_api_client(
+            client_id=client_id,
+            client_secret_hash=client_secret_hash,
+            name=name,
+            scopes=scopes,
+            using_db=connection,
+        )
+        await ApiClientRedirectUri.bulk_create(
+            [
+                ApiClientRedirectUri(client=client, redirect_uri=redirect_uri)
+                for redirect_uri in redirect_uris
+            ],
+            using_db=connection,
+        )
+        return client
 
 
 async def get_api_client_by_client_id(client_id: str) -> ApiClient | None:

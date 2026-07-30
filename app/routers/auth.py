@@ -1,19 +1,39 @@
 import base64
 import binascii
+import json
 from typing import Annotated
 from urllib.parse import parse_qsl, urlencode, unquote_plus, urlsplit, urlunsplit
 
 from fastapi import APIRouter, Form, Header, HTTPException, Query, Request, status
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
+from pydantic import ValidationError
 
-from app.schemas.auth import TokenResponse
+from app.schemas.auth import (
+    DynamicClientRegistrationErrorResponse,
+    DynamicClientRegistrationRequest,
+    DynamicClientRegistrationResponse,
+    TokenResponse,
+)
 from app.services.auth import (
+    DynamicClientRegistrationError,
     create_authorization_code_redirect,
     issue_authorization_code_token,
     issue_client_credentials_token,
+    register_dynamic_api_client,
 )
 
 router = APIRouter(tags=["auth"])
+MAX_REGISTRATION_BODY_BYTES = 64 * 1024
+REGISTRATION_REQUEST_BODY_SCHEMA = {
+    "requestBody": {
+        "required": True,
+        "content": {
+            "application/json": {
+                "schema": DynamicClientRegistrationRequest.model_json_schema()
+            }
+        },
+    }
+}
 
 
 @router.get(
@@ -62,6 +82,7 @@ async def oauth_authorization_server_metadata(request: Request):
         "issuer": base_url,
         "authorization_endpoint": f"{base_url}/authorize",
         "token_endpoint": f"{base_url}/oauth/token",
+        "registration_endpoint": f"{base_url}/register",
         "response_types_supported": ["code"],
         "grant_types_supported": ["authorization_code", "client_credentials"],
         "code_challenge_methods_supported": ["S256"],
@@ -72,6 +93,58 @@ async def oauth_authorization_server_metadata(request: Request):
         ],
         "scopes_supported": ["weather:read", "weather:history:read"],
     }
+
+
+@router.post(
+    "/register",
+    response_model=DynamicClientRegistrationResponse,
+    status_code=status.HTTP_201_CREATED,
+    operation_id="register_oauth_client",
+    summary="Dynamically register an OAuth client",
+    description=(
+        "Registers a public authorization-code client using RFC 7591 metadata."
+    ),
+    responses={400: {"model": DynamicClientRegistrationErrorResponse}},
+    openapi_extra=REGISTRATION_REQUEST_BODY_SCHEMA,
+)
+async def register_client(
+    request: Request,
+) -> DynamicClientRegistrationResponse | JSONResponse:
+    """Register a public PKCE client and return RFC 7591 client metadata."""
+    content_type = request.headers.get("content-type", "").partition(";")[0]
+    if content_type.strip().lower() != "application/json":
+        return _registration_error(
+            "invalid_client_metadata",
+            "The registration request must use application/json.",
+        )
+
+    try:
+        raw_registration = await _read_registration_json(request)
+        if not isinstance(raw_registration, dict):
+            raise ValueError
+        registration = DynamicClientRegistrationRequest.model_validate(
+            raw_registration
+        )
+    except ValidationError:
+        error = (
+            "invalid_redirect_uri"
+            if _has_invalid_redirect_metadata(raw_registration)
+            else "invalid_client_metadata"
+        )
+        return _registration_error(
+            error,
+            "The registration request contains invalid client metadata.",
+        )
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+        return _registration_error(
+            "invalid_client_metadata",
+            "The registration request must be a valid JSON object.",
+        )
+
+    try:
+        return await register_dynamic_api_client(registration)
+    except DynamicClientRegistrationError as exc:
+        return _registration_error(exc.error, exc.description)
 
 
 @router.post(
@@ -153,6 +226,39 @@ def _parse_basic_auth(authorization: str | None) -> tuple[str | None, str | None
         ) from None
 
     return unquote_plus(client_id), unquote_plus(client_secret)
+
+
+def _registration_error(error: str, description: str) -> JSONResponse:
+    return JSONResponse(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        content={"error": error, "error_description": description},
+    )
+
+
+async def _read_registration_json(request: Request) -> object:
+    content_length = request.headers.get("content-length")
+    if content_length is not None:
+        try:
+            if int(content_length) > MAX_REGISTRATION_BODY_BYTES:
+                raise ValueError
+        except ValueError:
+            raise ValueError from None
+
+    body = bytearray()
+    async for chunk in request.stream():
+        body.extend(chunk)
+        if len(body) > MAX_REGISTRATION_BODY_BYTES:
+            raise ValueError
+    return json.loads(body)
+
+
+def _has_invalid_redirect_metadata(registration: dict[str, object]) -> bool:
+    redirect_uris = registration.get("redirect_uris")
+    return (
+        not isinstance(redirect_uris, list)
+        or not 1 <= len(redirect_uris) <= 10
+        or any(not isinstance(uri, str) for uri in redirect_uris)
+    )
 
 
 def _resolve_client_secret_credentials(

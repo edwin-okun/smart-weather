@@ -15,7 +15,8 @@ review in an interview.
 - Fetches current weather from Open-Meteo without requiring a weather API key.
 - Saves successful lookups to SQLite with Tortoise ORM.
 - Protects weather routes with short-lived bearer tokens.
-- Supports OAuth client credentials and authorization code with PKCE.
+- Supports OAuth client credentials, authorization code with PKCE, and
+  RFC 7591 Dynamic Client Registration.
 - Mounts FastAPI routes as MCP tools at `/mcp`.
 
 ## Quick Start
@@ -45,6 +46,7 @@ Useful public endpoints:
 - `GET /health`
 - `GET /docs`
 - `GET /.well-known/oauth-authorization-server`
+- `POST /register`
 
 ### 3. Create an API Client
 
@@ -104,6 +106,7 @@ curl "http://localhost:8000/weather/history?limit=10" \
 | `GET /weather?city=Nairobi&country_code=KE` | `weather:read` | Fetch current weather and save the lookup |
 | `GET /weather/history?limit=20` | `weather:history:read` | List recent saved lookups |
 | `GET /authorize` | Public | Start OAuth authorization-code flow with PKCE |
+| `POST /register` | Public | Dynamically register a public PKCE client |
 | `POST /oauth/token` | Public | Exchange client credentials or authorization code for a bearer token |
 | `GET /.well-known/oauth-authorization-server` | Public | OAuth metadata |
 | `/mcp` | Bearer token | MCP endpoint generated from FastAPI routes |
@@ -151,6 +154,36 @@ Available scopes:
 
 - `weather:read`
 - `weather:history:read`
+
+### Dynamic Client Registration
+
+OAuth and MCP clients can discover the registration endpoint through
+`GET /.well-known/oauth-authorization-server`. Register a public
+authorization-code client with JSON metadata:
+
+```bash
+curl -X POST "http://localhost:8000/register" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "client_name": "local-mcp-client",
+    "redirect_uris": ["http://127.0.0.1/callback"],
+    "grant_types": ["authorization_code"],
+    "response_types": ["code"],
+    "token_endpoint_auth_method": "none",
+    "scope": "weather:read weather:history:read"
+  }'
+```
+
+The response contains a generated `client_id` and the effective registration
+metadata. Dynamically registered clients are public clients: they receive no
+client secret and use the authorization-code flow with S256 PKCE. Loopback
+redirect URIs registered without a port accept a dynamic port during
+authorization. If `scope` is omitted or blank, the client receives only
+`weather:read`; access to weather history must be requested explicitly.
+
+Registration is intentionally unauthenticated. For an internet-facing
+deployment, protect `/register` with deployment-level rate limiting and
+monitoring to limit automated abuse and unbounded client creation.
 
 ### Client Commands
 
@@ -236,8 +269,9 @@ Available MCP tools are generated from OpenAPI operation IDs:
 - `list_weather_history`
 - `health`
 
-The token endpoint is intentionally excluded from MCP because OAuth token
-requests use form encoding.
+The authorization, token, and dynamic registration operations are
+intentionally excluded from generated MCP tools because they are OAuth
+protocol endpoints rather than weather tools.
 
 ## Configuration
 
