@@ -8,6 +8,7 @@ class TokenResponse(BaseModel):
     token_type: str = "Bearer"
     expires_in: int
     scope: str = ""
+    refresh_token: str | None = None
 
 
 class AuthenticatedClient(BaseModel):
@@ -46,6 +47,8 @@ class DynamicClientRegistrationResponse(BaseModel):
     response_types: list[str]
     token_endpoint_auth_method: str
     scope: str
+    client_secret: str | None = None
+    client_secret_expires_at: int | None = None
 
 
 class DynamicClientRegistrationErrorResponse(BaseModel):

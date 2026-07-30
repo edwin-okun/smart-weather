@@ -67,3 +67,22 @@ class AuthorizationCode(Model):
 
     class Meta:
         table = "authorization_codes"
+
+
+class RefreshToken(Model):
+    id = fields.IntField(primary_key=True)
+    token_hash = fields.CharField(max_length=64, unique=True, index=True)
+    family_id = fields.CharField(max_length=64, index=True)
+    client: fields.ForeignKeyRelation[ApiClient] = fields.ForeignKeyField(
+        "models.ApiClient",
+        related_name="refresh_tokens",
+        on_delete=fields.CASCADE,
+    )
+    scopes = fields.JSONField(default=list)
+    expires_at = fields.DatetimeField(index=True)
+    consumed_at = fields.DatetimeField(null=True)
+    revoked_at = fields.DatetimeField(null=True)
+    created_at = fields.DatetimeField(auto_now_add=True)
+
+    class Meta:
+        table = "refresh_tokens"

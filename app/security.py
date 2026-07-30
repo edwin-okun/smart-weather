@@ -34,6 +34,16 @@ def generate_authorization_code() -> str:
     return f"swac_{secrets.token_urlsafe(32)}"
 
 
+def generate_refresh_token() -> str:
+    """Generate an opaque rotating refresh token."""
+    return f"swrt_{secrets.token_urlsafe(48)}"
+
+
+def generate_token_family_id() -> str:
+    """Generate a non-secret identifier for one refresh-token family."""
+    return secrets.token_urlsafe(32)
+
+
 def hash_token(token: str) -> str:
     """Hash opaque tokens and authorization codes for lookup without storing secrets."""
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
