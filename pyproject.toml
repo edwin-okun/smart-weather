@@ -6,6 +6,7 @@ dependencies = [
     "aiosqlite>=0.22.1",
     "fastapi-mcp>=0.4.0",
     "fastapi[standard]>=0.139.2",
+    "langchain>=1.4.2",
     "pydantic>=2.13.4",
     "pydantic-settings>=2.14.2",
     "tortoise-orm>=1.1.7",
