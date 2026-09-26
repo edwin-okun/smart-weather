@@ -8,3 +8,11 @@ class LocationNotFoundError(WeatherServiceError):
 
 class UpstreamServiceError(WeatherServiceError):
     pass
+
+
+class AIServiceError(Exception):
+    """Base error for AI service failures."""
+
+
+class AIUpstreamError(AIServiceError):
+    pass

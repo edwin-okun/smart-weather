@@ -2,9 +2,11 @@ import logging
 from typing import Any
 
 import httpx
+from openai import OpenAI, OpenAIError
+from openai.types.chat import ChatCompletion
 
 from app.config import settings
-from app.exceptions import UpstreamServiceError
+from app.exceptions import AIUpstreamError, UpstreamServiceError
 
 logger = logging.getLogger(__name__)
 
@@ -106,3 +108,33 @@ class OpenMeteoClient:
 
 
 open_meteo_client = OpenMeteoClient(weather_client)
+
+
+openai_client = OpenAI(api_key=settings.openai_api_key)
+
+
+class OpenAIChatClient:
+    def __init__(self, client: OpenAI):
+        self.client = client
+
+    def create_chat_completion(
+        self,
+        *,
+        model: str,
+        messages: list[dict[str, str]],
+        temperature: float,
+        max_completion_tokens: int,
+    ) -> ChatCompletion:
+        try:
+            return self.client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=temperature,
+                max_completion_tokens=max_completion_tokens,
+            )
+        except OpenAIError as exc:
+            logger.exception("OpenAI chat completion request failed for model %s", model)
+            raise AIUpstreamError("OpenAI chat completion request failed") from exc
+
+
+openai_chat_client = OpenAIChatClient(openai_client)
