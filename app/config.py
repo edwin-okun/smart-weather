@@ -13,5 +13,8 @@ class Settings(BaseSettings):
     refresh_token_ttl_seconds: int = 2_592_000
     public_base_url: str | None = None
 
+    # api keys
+    openai_api_key: str | None = None
+
 
 settings = Settings()
