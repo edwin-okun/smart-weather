@@ -9,7 +9,7 @@ from app.clients import weather_client
 from app.config import settings
 from app.db import close_db, init_db
 from app.dependencies import get_current_client
-from app.routers import auth_router, health_router, weather_router
+from app.routers import ai_router, auth_router, health_router, weather_router
 
 logging.basicConfig(level=logging.INFO)
 
@@ -29,6 +29,7 @@ def create_app() -> FastAPI:
     app.include_router(auth_router)
     app.include_router(health_router)
     app.include_router(weather_router)
+    app.include_router(ai_router)
     return app
 
 
@@ -40,6 +41,7 @@ app = create_app()
 mcp = FastApiMCP(
     app,
     exclude_operations=[
+        "ask_weather_assistant",
         "authorize_oauth_client",
         "issue_oauth_token",
         "register_oauth_client",
