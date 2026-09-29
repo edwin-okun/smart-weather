@@ -129,6 +129,12 @@ class BackendTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(RuntimeError):
             await self._backend(history="broken").get_weather_history()
 
+    async def test_history_city_filter_applies_before_limit(self) -> None:
+        # Nairobi is the third entry, so a limit of 2 without the filter misses it.
+        items = await self._backend(history="recent").get_weather_history(limit=2, city="NAIROBI")
+        self.assertEqual([i.location.name for i in items], ["Nairobi"])
+        self.assertEqual(items[0].weather["current"]["temperature_2m"], 14.2)
+
     async def test_patched_service_refuses_without_active_backend(self) -> None:
         with self.assertRaises(RuntimeError):
             await _fake_get_weather_for_city("Nairobi")

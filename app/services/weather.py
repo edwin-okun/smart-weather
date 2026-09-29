@@ -25,8 +25,8 @@ async def get_weather_for_city(city: str, country_code: str = "KE") -> WeatherRe
     return WeatherResponse(location=location, weather=forecast_data)
 
 
-async def get_weather_history(limit: int = 20) -> list[WeatherHistoryItem]:
-    lookups = await list_weather_lookups(limit=limit)
+async def get_weather_history(limit: int = 20, city: str | None = None) -> list[WeatherHistoryItem]:
+    lookups = await list_weather_lookups(limit=limit, city=city)
     return [
         WeatherHistoryItem(
             id=lookup.id,

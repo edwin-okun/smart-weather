@@ -20,5 +20,6 @@ async def create_weather_lookup(
     )
 
 
-async def list_weather_lookups(limit: int = 20) -> list[WeatherLookup]:
-    return await WeatherLookup.all().limit(limit)
+async def list_weather_lookups(limit: int = 20, city: str | None = None) -> list[WeatherLookup]:
+    lookups = WeatherLookup.all() if city is None else WeatherLookup.filter(city__iexact=city)
+    return await lookups.limit(limit)
