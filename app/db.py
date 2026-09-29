@@ -61,7 +61,7 @@ async def init_db() -> None:
         pending = await _pending_migrations()
         if pending:
             logger.warning(
-                "Database has unapplied migrations (%s); run `python -m app.cli migrate`.",
+                "Database has unapplied migrations (%s); run `uv run smart-weather migrate`.",
                 ", ".join(pending),
             )
 

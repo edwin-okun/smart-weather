@@ -33,7 +33,7 @@ uv sync
 ### 2. Create the Database and Start the API
 
 ```bash
-uv run python -m app.cli migrate
+uv run smart-weather migrate
 uv run fastapi dev
 ```
 
@@ -59,7 +59,7 @@ Useful public endpoints:
 In a second terminal, create a local client:
 
 ```bash
-uv run python -m app.cli create-client --name local-dev
+uv run smart-weather create-client --name local-dev
 ```
 
 The command prints a `client_id` and one-time `client_secret`.
@@ -218,13 +218,13 @@ monitoring to limit automated abuse and unbounded client creation.
 Create a client with default scopes:
 
 ```bash
-uv run python -m app.cli create-client --name partner-service
+uv run smart-weather create-client --name partner-service
 ```
 
 Create a client with explicit scopes:
 
 ```bash
-uv run python -m app.cli create-client \
+uv run smart-weather create-client \
   --name partner-service \
   --scope weather:read \
   --scope weather:history:read
@@ -233,19 +233,19 @@ uv run python -m app.cli create-client \
 List clients without exposing secrets:
 
 ```bash
-uv run python -m app.cli list-clients
+uv run smart-weather list-clients
 ```
 
 Rotate a client secret and revoke active tokens:
 
 ```bash
-uv run python -m app.cli rotate-secret --client-id "$CLIENT_ID"
+uv run smart-weather rotate-secret --client-id "$CLIENT_ID"
 ```
 
 Disable a client and revoke active tokens:
 
 ```bash
-uv run python -m app.cli disable-client --client-id "$CLIENT_ID"
+uv run smart-weather disable-client --client-id "$CLIENT_ID"
 ```
 
 ### PKCE Redirect URIs
@@ -254,7 +254,7 @@ For VS Code or AI clients that redirect through `https://vscode.dev/redirect`,
 register that exact redirect URI:
 
 ```bash
-uv run python -m app.cli add-redirect-uri \
+uv run smart-weather add-redirect-uri \
   --client-id "$CLIENT_ID" \
   --redirect-uri "https://vscode.dev/redirect"
 ```
@@ -263,7 +263,7 @@ For native apps that use a local callback with a random port, register the
 loopback URI without a port:
 
 ```bash
-uv run python -m app.cli add-redirect-uri \
+uv run smart-weather add-redirect-uri \
   --client-id "$CLIENT_ID" \
   --redirect-uri "http://127.0.0.1/"
 ```
@@ -367,8 +367,8 @@ tables and never alters existing ones.
 Apply pending migrations (safe to re-run; it only moves forward):
 
 ```bash
-uv run python -m app.cli migrate            # everything pending
-uv run python -m app.cli migrate --dry-run  # show the plan only
+uv run smart-weather migrate            # everything pending
+uv run smart-weather migrate --dry-run  # show the plan only
 ```
 
 Run this as a deploy step before starting the new version. The app logs a
@@ -398,11 +398,11 @@ and apply the rest:
 
 ```bash
 # Database created from main before migrations (no access_tokens.family_id):
-uv run python -m app.cli migrate 0001_initial --fake
-uv run python -m app.cli migrate
+uv run smart-weather migrate 0001_initial --fake
+uv run smart-weather migrate
 
 # Database already created from these models (has family_id and weather_lookups.client_id):
-uv run python -m app.cli migrate --fake
+uv run smart-weather migrate --fake
 ```
 
 `uv run python -m tortoise -c app.db.TORTOISE_ORM history` shows what is
@@ -436,7 +436,7 @@ uv run python -m evals.run --cases 'cw-*' --no-judge
 Run the CLI help:
 
 ```bash
-uv run python -m app.cli --help
+uv run smart-weather --help
 ```
 
 Deploy to FastAPI Cloud:
