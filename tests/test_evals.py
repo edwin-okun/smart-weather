@@ -331,8 +331,12 @@ class RunCaseTests(unittest.IsolatedAsyncioTestCase):
         system, user = judge_messages(DATASET, case, "answer", [], TODAY)
         self.assertIn("Mombasa (29.1 °C) is warmer", system["content"])
         evidence = json.loads(user["content"])
-        self.assertEqual(evidence["fixture_data"]["locations"]["mombasa"]["current"]["temperature_2m"], 29.1)
+        self.assertEqual(evidence["backend_data"]["locations"]["mombasa"]["current"]["temperature_2m"], 29.1)
         self.assertEqual(evidence["tools_available_to_assistant"], ["get_current_weather"])
+
+        # Data behind a tool the caller lacks is not shown to the judge.
+        denied = next(c for c in DATASET.cases if c.id == "scope-history-denied")
+        self.assertNotIn("history", json.loads(judge_messages(DATASET, denied, "a", [], TODAY)[1]["content"])["backend_data"])
 
 
 class MainTests(unittest.IsolatedAsyncioTestCase):

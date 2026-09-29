@@ -15,6 +15,8 @@ from app.ai.tools import build_tools
 from evals.dataset import Case, Dataset, fill_dates
 
 JUDGE_PROMPT = """You grade one answer from a weather assistant. Be strict and use only the evidence given.
+`tool_results` is exactly what the assistant received; `backend_data` is what its tools could have
+returned, for reference. Judge grounding against `tool_results`.
 
 Pass only if ALL hold:
 1. Grounded: every weather fact in the answer (numbers, conditions, places, times) comes from the tool results. Rounding and unit conversion are fine. With no tool results, the answer states no current conditions.
@@ -31,19 +33,25 @@ class Verdict(BaseModel):
 
 
 def fixture_view(dataset: Dataset, case: Case, today: date) -> dict[str, Any]:
-    """The data the case's weather backends could return, trimmed to what matters."""
-    locations = {}
-    for name in case.fixtures:
-        fixture = dataset.fixtures.locations[name]
-        geo = fixture.geocoding
-        place = ", ".join(str(geo[k]) for k in ("name", "admin1", "country") if geo.get(k))
-        if fixture.error is not None:
-            locations[name] = {"place": place, "error": fixture.error.message}
-        else:
-            forecast = fill_dates(fixture.forecast, today)
-            locations[name] = {"place": place, "current": forecast["current"], "units": forecast["current_units"]}
-    view: dict[str, Any] = {"locations": locations}
-    if case.history:
+    """The fixture data the assistant's tools could have returned, trimmed to what matters.
+
+    Data behind a tool the caller lacks is left out: a small judge otherwise
+    fails correct refusals for "omitting" it.
+    """
+    tools = {t.name for t in build_tools(set(case.scopes))}
+    view: dict[str, Any] = {}
+    if "get_current_weather" in tools:
+        view["locations"] = {}
+        for name in case.fixtures:
+            fixture = dataset.fixtures.locations[name]
+            geo = fixture.geocoding
+            place = ", ".join(str(geo[k]) for k in ("name", "admin1", "country") if geo.get(k))
+            if fixture.error is not None:
+                view["locations"][name] = {"place": place, "error": fixture.error.message}
+            else:
+                forecast = fill_dates(fixture.forecast, today)
+                view["locations"][name] = {"place": place, "current": forecast["current"], "units": forecast["current_units"]}
+    if case.history and "list_weather_history" in tools:
         history = dataset.fixtures.history[case.history]
         view["history"] = (
             {"error": history.error.message}
@@ -59,7 +67,7 @@ def judge_messages(dataset: Dataset, case: Case, answer: str, tool_results: list
         "question": case.question,
         "tools_available_to_assistant": [t.name for t in build_tools(set(case.scopes))],
         "tool_results": tool_results,
-        "fixture_data": fixture_view(dataset, case, today),
+        "backend_data": fixture_view(dataset, case, today),
         "answer": answer,
     }
     return [
