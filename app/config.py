@@ -23,6 +23,12 @@ class Settings(BaseSettings):
     # Set as JSON in the environment, e.g. '["weather:read"]'.
     dynamic_registration_allowed_scopes: list[str] = [WEATHER_READ]
 
+    # Weather history: each API client sees only its own lookups, for this many
+    # days. Older rows are hidden from history immediately and deleted in bounded
+    # batches (weather_history_prune_batch_size rows) each time a lookup is saved.
+    weather_history_retention_days: PositiveInt = 30
+    weather_history_prune_batch_size: PositiveInt = 500
+
     # AI: LangChain "provider:model" string; api key falls back to openai_api_key
     # for openai models. ai_timeout/ai_max_retries apply per model call, while
     # ai_request_timeout bounds the whole /ai/ask run. ai_max_steps is the agent

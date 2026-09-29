@@ -13,7 +13,12 @@ from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from pydantic import Field, ValidationError
 
-from app.ai.tools import build_tools, get_current_weather, list_weather_history
+from app.ai.tools import (
+    build_tools,
+    get_current_weather,
+    list_weather_history,
+    run_config_for_client,
+)
 from app.config import Settings
 from app.exceptions import (
     AIRateLimitError,
@@ -38,6 +43,7 @@ OPEN_METEO_PAYLOAD = {
     "current_units": {"time": "iso8601", "interval": "seconds", "temperature_2m": "°C"},
     "current": {"time": "2026-09-29T12:00", "interval": 900, "temperature_2m": 21.0},
 }
+CLIENT_CONFIG = run_config_for_client(1)
 NAIROBI = WeatherLocation(name="Nairobi", country="Kenya", latitude=-1.28, longitude=36.82)
 
 
@@ -117,7 +123,7 @@ class ToolTests(unittest.IsolatedAsyncioTestCase):
     async def test_current_weather_is_trimmed(self) -> None:
         weather = WeatherResponse(location=NAIROBI, weather=OPEN_METEO_PAYLOAD)
         with patch("app.ai.tools.get_weather_for_city", AsyncMock(return_value=weather)):
-            result = await get_current_weather.ainvoke({"city": "Nairobi"})
+            result = await get_current_weather.ainvoke({"city": "Nairobi"}, CLIENT_CONFIG)
 
         self.assertEqual(
             result,
@@ -139,9 +145,9 @@ class ToolTests(unittest.IsolatedAsyncioTestCase):
             created_at=datetime(2026, 9, 29, 9, 0, tzinfo=UTC),
         )
         with patch("app.ai.tools.get_weather_history", AsyncMock(return_value=[item])) as fetch:
-            result = await list_weather_history.ainvoke({"limit": 3})
+            result = await list_weather_history.ainvoke({"limit": 3}, CLIENT_CONFIG)
 
-        fetch.assert_awaited_once_with(limit=3)
+        fetch.assert_awaited_once_with(api_client_id=1, limit=3)
         self.assertEqual(result[0]["location"], "Nairobi, Kenya")
         self.assertEqual(result[0]["looked_up_at"], "2026-09-29T09:00:00+00:00")
         self.assertNotIn("elevation", str(result))
@@ -151,16 +157,29 @@ class ToolTests(unittest.IsolatedAsyncioTestCase):
             "app.ai.tools.get_weather_for_city",
             AsyncMock(side_effect=LocationNotFoundError("No location found for city Atlantis")),
         ):
-            result = await get_current_weather.ainvoke({"city": "Atlantis"})
+            result = await get_current_weather.ainvoke({"city": "Atlantis"}, CLIENT_CONFIG)
 
         self.assertEqual(result, {"error": "No location found for city Atlantis"})
 
     async def test_arguments_are_validated(self) -> None:
         for args in ({"city": "Nairobi", "country_code": "KEN"}, {"city": ""}, {"city": "x" * 101}):
             with self.subTest(args=args), self.assertRaises(ValidationError):
-                await get_current_weather.ainvoke(args)
+                await get_current_weather.ainvoke(args, CLIENT_CONFIG)
         with self.assertRaises(ValidationError):
-            await list_weather_history.ainvoke({"limit": 500})
+            await list_weather_history.ainvoke({"limit": 500}, CLIENT_CONFIG)
+
+    async def test_tools_fail_closed_without_a_client(self) -> None:
+        # History must never fall back to an unscoped query.
+        with (
+            patch("app.ai.tools.get_weather_history", AsyncMock()) as history,
+            patch("app.ai.tools.get_weather_for_city", AsyncMock()) as lookup,
+        ):
+            with self.assertRaises(RuntimeError):
+                await list_weather_history.ainvoke({"limit": 3})
+            with self.assertRaises(RuntimeError):
+                await get_current_weather.ainvoke({"city": "Nairobi"})
+        history.assert_not_awaited()
+        lookup.assert_not_awaited()
 
 
 class AskWeatherAssistantTests(unittest.IsolatedAsyncioTestCase):
@@ -197,7 +216,8 @@ class AskWeatherAssistantTests(unittest.IsolatedAsyncioTestCase):
         with patch("app.ai.tools.get_weather_for_city", AsyncMock(return_value=weather)) as fetch:
             result = await self._ask(model, WEATHER_READ)
 
-        fetch.assert_awaited_once_with(city="Nairobi", country_code="KE")
+        # Recorded under the calling client (_client uses id=1).
+        fetch.assert_awaited_once_with(city="Nairobi", country_code="KE", api_client_id=1)
         self.assertEqual(result.answer, "It is 21C in Nairobi.")
         self.assertEqual([c.name for c in result.tool_calls], ["get_current_weather"])
         self.assertEqual(result.usage.input_tokens, 30)
