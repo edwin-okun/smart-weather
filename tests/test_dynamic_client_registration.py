@@ -397,7 +397,7 @@ class DynamicClientRegistrationTests(unittest.TestCase):
         for scope in [
             "ai:ask",
             "weather:read ai:ask",
-            "weather:history:read",
+            "weather:history:read ai:ask",
             "weather:read weather:history:read ai:ask",
         ]:
             for auth_method in ["none", "client_secret_basic"]:
@@ -417,8 +417,16 @@ class DynamicClientRegistrationTests(unittest.TestCase):
 
         self.assertEqual(self.client.portal.call(_client_count), 0)
 
-    def test_registration_with_default_allowed_scope_succeeds(self) -> None:
-        for payload in [{}, {"scope": "weather:read"}]:
+    def test_registration_with_default_allowed_scopes_succeeds(self) -> None:
+        for payload, granted in [
+            ({}, "weather:read"),
+            ({"scope": "weather:read"}, "weather:read"),
+            ({"scope": "weather:history:read"}, "weather:history:read"),
+            (
+                {"scope": "weather:read weather:history:read"},
+                "weather:history:read weather:read",
+            ),
+        ]:
             with self.subTest(payload=payload):
                 response = self.client.post(
                     "/register",
@@ -428,16 +436,19 @@ class DynamicClientRegistrationTests(unittest.TestCase):
                     },
                 )
                 self.assertEqual(response.status_code, 201)
-                self.assertEqual(response.json()["scope"], "weather:read")
+                self.assertEqual(response.json()["scope"], granted)
 
         metadata = self.client.get("/.well-known/oauth-authorization-server")
-        self.assertEqual(metadata.json()["scopes_supported"], ["weather:read"])
+        self.assertEqual(
+            metadata.json()["scopes_supported"],
+            ["weather:history:read", "weather:read"],
+        )
 
     def test_registration_allowlist_is_configurable(self) -> None:
         with patch.object(
             settings,
             "dynamic_registration_allowed_scopes",
-            ["weather:history:read", "weather:read"],
+            ["weather:read"],
         ):
             response = self.client.post(
                 "/register",
@@ -448,12 +459,9 @@ class DynamicClientRegistrationTests(unittest.TestCase):
             )
             metadata = self.client.get("/.well-known/oauth-authorization-server")
 
-        self.assertEqual(response.status_code, 201)
-        self.assertEqual(response.json()["scope"], "weather:history:read weather:read")
-        self.assertEqual(
-            metadata.json()["scopes_supported"],
-            ["weather:history:read", "weather:read"],
-        )
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"], "invalid_client_metadata")
+        self.assertEqual(metadata.json()["scopes_supported"], ["weather:read"])
         with self.assertRaises(ValueError):
             Settings(dynamic_registration_allowed_scopes=["weather:write"])
         self.assertNotIn(AI_ASK, Settings().dynamic_registration_allowed_scopes)

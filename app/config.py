@@ -1,7 +1,7 @@
 from pydantic import PositiveInt, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from app.permissions import ALL_SCOPES, WEATHER_READ
+from app.permissions import ALL_SCOPES, WEATHER_HISTORY_READ, WEATHER_READ
 
 
 class Settings(BaseSettings):
@@ -24,11 +24,12 @@ class Settings(BaseSettings):
     public_base_url: str | None = None
     # Scopes an unauthenticated client may request via dynamic client
     # registration (POST /register); anything else is rejected with
-    # invalid_client_metadata. Keep this least-privilege: weather:history:read
-    # exposes every client's saved lookups and ai:ask spends the LLM budget, so
-    # grant those only to admin-created clients (app.cli create-client).
+    # invalid_client_metadata. weather:history:read is safe to self-grant because
+    # history is scoped to the calling client. ai:ask spends the LLM budget, so
+    # grant it only to admin-created clients (app.cli create-client). A
+    # registration that names no scope still gets only weather:read.
     # Set as JSON in the environment, e.g. '["weather:read"]'.
-    dynamic_registration_allowed_scopes: list[str] = [WEATHER_READ]
+    dynamic_registration_allowed_scopes: list[str] = [WEATHER_READ, WEATHER_HISTORY_READ]
 
     # Weather history: each API client sees only its own lookups, for this many
     # days. Older rows are hidden from history immediately and deleted in bounded
