@@ -14,6 +14,7 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from pydantic import Field, ValidationError
 
 from app.ai.tools import build_tools, get_current_weather, list_weather_history
+from app.config import Settings
 from app.exceptions import (
     AIRateLimitError,
     AIStepLimitError,
@@ -330,10 +331,16 @@ class AskWeatherAssistantTests(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(ai_service.settings, "ai_max_concurrency", 1):
             first = asyncio.create_task(self._ask(held, WEATHER_READ))
-            await asyncio.sleep(0.05)  # let it take the only slot
+            # One loop turn runs the task up to the model call, past taking the only slot.
+            await asyncio.sleep(0)
+            self.assertTrue(ai_service._run_slots().locked())
 
-            with self.assertLogs(ai_service.logger, "WARNING"), self.assertRaises(AIRateLimitError):
+            with (
+                self.assertLogs(ai_service.logger, "WARNING"),
+                self.assertRaises(AIRateLimitError) as ctx,
+            ):
                 await self._ask(_model(), WEATHER_READ)
+            self.assertEqual(ctx.exception.retry_after, 1)
 
             gate.set()
             self.assertEqual((await first).answer, "ok")
@@ -346,6 +353,12 @@ class AskWeatherAssistantTests(unittest.IsolatedAsyncioTestCase):
                 await self._ask(_model(cls=FailingModel), WEATHER_READ)
 
             self.assertFalse(ai_service._run_slots().locked())
+
+    def test_concurrency_cap_must_be_positive(self) -> None:
+        # 0 would reject every request and a negative value breaks asyncio.Semaphore.
+        for value in (0, -1):
+            with self.subTest(value=value), self.assertRaises(ValidationError):
+                Settings(_env_file=None, ai_max_concurrency=value)
 
     async def test_agent_is_cached_per_tool_scope_set(self) -> None:
         with patch.object(ai_service, "get_chat_model", return_value=_model()) as get_model:
