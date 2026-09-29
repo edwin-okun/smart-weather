@@ -8,18 +8,17 @@ from app.config import settings
 from app.permissions import ALL_SCOPES, WEATHER_READ
 from app.repositories.auth import (
     add_redirect_uri_to_client,
-    consume_authorization_code,
     create_access_token,
     create_api_client,
     create_api_client_with_redirect_uris,
     create_authorization_code,
-    create_refresh_token,
     get_access_token_by_hash,
     get_authorization_code_by_hash,
     get_api_client_by_client_id,
     get_refresh_token_by_hash,
     list_redirect_uris_for_client,
     list_api_clients,
+    redeem_authorization_code,
     revoke_access_tokens_for_client,
     revoke_refresh_tokens_for_client,
     rotate_refresh_token,
@@ -387,13 +386,36 @@ async def issue_authorization_code_token(
             detail="invalid_grant",
         )
 
-    await consume_authorization_code(authorization_code, utc_now())
     effective_scopes = sorted(
         set(authorization_code.scopes) & set(authorization_code.client.scopes)
     )
-    return await _issue_access_and_refresh_token(
-        client=authorization_code.client,
+    access_token = generate_access_token()
+    refresh_token = generate_refresh_token()
+    now = utc_now()
+    redeemed = await redeem_authorization_code(
+        authorization_code=authorization_code,
+        access_token_hash=hash_token(access_token),
+        refresh_token_hash=hash_token(refresh_token),
+        refresh_family_id=generate_token_family_id(),
         scopes=effective_scopes,
+        access_expires_at=now
+        + timedelta(seconds=settings.access_token_ttl_seconds),
+        refresh_expires_at=now
+        + timedelta(seconds=settings.refresh_token_ttl_seconds),
+        redeemed_at=now,
+    )
+    if not redeemed:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="invalid_grant",
+        )
+
+    await update_api_client_last_used(authorization_code.client, now)
+    return TokenResponse(
+        access_token=access_token,
+        expires_in=settings.access_token_ttl_seconds,
+        scope=" ".join(effective_scopes),
+        refresh_token=refresh_token,
     )
 
 
@@ -633,35 +655,4 @@ async def _issue_access_token(*, client, scopes: list[str]) -> TokenResponse:
         access_token=token,
         expires_in=expires_in,
         scope=" ".join(scopes),
-    )
-
-
-async def _issue_access_and_refresh_token(
-    *,
-    client,
-    scopes: list[str],
-) -> TokenResponse:
-    """Issue an access token and initial opaque refresh token."""
-    access_token = generate_access_token()
-    refresh_token = generate_refresh_token()
-    now = utc_now()
-    await create_access_token(
-        token_hash=hash_token(access_token),
-        client=client,
-        scopes=scopes,
-        expires_at=now + timedelta(seconds=settings.access_token_ttl_seconds),
-    )
-    await create_refresh_token(
-        token_hash=hash_token(refresh_token),
-        family_id=generate_token_family_id(),
-        client=client,
-        scopes=scopes,
-        expires_at=now + timedelta(seconds=settings.refresh_token_ttl_seconds),
-    )
-    await update_api_client_last_used(client, now)
-    return TokenResponse(
-        access_token=access_token,
-        expires_in=settings.access_token_ttl_seconds,
-        scope=" ".join(scopes),
-        refresh_token=refresh_token,
     )

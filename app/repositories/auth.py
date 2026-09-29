@@ -279,9 +279,44 @@ async def get_authorization_code_by_hash(
     )
 
 
-async def consume_authorization_code(
+async def redeem_authorization_code(
+    *,
     authorization_code: AuthorizationCode,
-    consumed_at: datetime,
-) -> None:
-    authorization_code.consumed_at = consumed_at
-    await authorization_code.save(update_fields=["consumed_at"])
+    access_token_hash: str,
+    refresh_token_hash: str,
+    refresh_family_id: str,
+    scopes: list[str],
+    access_expires_at: datetime,
+    refresh_expires_at: datetime,
+    redeemed_at: datetime,
+) -> bool:
+    """Atomically claim one authorization code and create its tokens.
+
+    The conditional update is the single-use guard: only one concurrent
+    redemption can move ``consumed_at`` from NULL, and tokens are created in
+    the same transaction so a failed issue leaves the code unconsumed.
+    """
+    async with in_transaction() as connection:
+        claimed = await AuthorizationCode.filter(
+            id=authorization_code.id,
+            consumed_at__isnull=True,
+            expires_at__gt=redeemed_at,
+        ).using_db(connection).update(consumed_at=redeemed_at)
+        if claimed != 1:
+            return False
+        await create_access_token(
+            token_hash=access_token_hash,
+            client=authorization_code.client,
+            scopes=scopes,
+            expires_at=access_expires_at,
+            using_db=connection,
+        )
+        await create_refresh_token(
+            token_hash=refresh_token_hash,
+            family_id=refresh_family_id,
+            client=authorization_code.client,
+            scopes=scopes,
+            expires_at=refresh_expires_at,
+            using_db=connection,
+        )
+        return True
