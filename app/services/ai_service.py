@@ -12,7 +12,7 @@ from langchain_core.messages import AIMessage
 from langgraph.errors import GraphRecursionError
 
 from app.ai.models import get_chat_model
-from app.ai.tools import TOOL_REQUIRED_SCOPES, build_tools
+from app.ai.tools import TOOL_REQUIRED_SCOPES, build_tools, run_config_for_client
 from app.config import settings
 from app.exceptions import AIRateLimitError, AIStepLimitError, AITimeoutError, AIUpstreamError
 from app.schemas.ai import AskResponse, TokenUsage, ToolCall
@@ -130,6 +130,7 @@ async def ask_weather_assistant(
             state = await agent.ainvoke(
                 {"messages": [{"role": "user", "content": question}]},
                 config={
+                    **run_config_for_client(client.id),
                     "recursion_limit": settings.ai_max_steps,
                     "run_name": "ask_weather_assistant",
                     "tags": ["smart-weather"],

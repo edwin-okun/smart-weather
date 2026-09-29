@@ -105,8 +105,8 @@ curl "http://localhost:8000/weather/history?limit=10" \
 | Endpoint | Auth | Purpose |
 | --- | --- | --- |
 | `GET /health` | Public | Service health check |
-| `GET /weather?city=Nairobi&country_code=KE` | `weather:read` | Fetch current weather and save the lookup |
-| `GET /weather/history?limit=20` | `weather:history:read` | List recent saved lookups |
+| `GET /weather?city=Nairobi&country_code=KE` | `weather:read` | Fetch current weather and save the lookup under the calling client |
+| `GET /weather/history?limit=20` | `weather:history:read` | List the calling client's own lookups from the last `WEATHER_HISTORY_RETENTION_DAYS` (default 30) days |
 | `GET /authorize` | Public | Start OAuth authorization-code flow with PKCE |
 | `POST /register` | Public | Dynamically register an OAuth PKCE client |
 | `POST /oauth/token` | Public | Exchange client credentials or authorization code for a bearer token |

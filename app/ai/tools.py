@@ -1,5 +1,6 @@
 from typing import Annotated, Any
 
+from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool, tool
 from pydantic import Field
 
@@ -8,11 +9,30 @@ from app.permissions import WEATHER_HISTORY_READ, WEATHER_READ
 from app.schemas.weather import WeatherLocation
 from app.services.weather import get_weather_for_city, get_weather_history
 
+# RunnableConfig["configurable"] key carrying the calling ApiClient primary key.
+# ask_weather_assistant sets it per run; the compiled agent is shared across
+# clients, so the identity must travel with the run, never with the agent.
+API_CLIENT_ID_KEY = "api_client_id"
+
+
+def run_config_for_client(api_client_id: int) -> RunnableConfig:
+    return {"configurable": {API_CLIENT_ID_KEY: api_client_id}}
+
+
+def _api_client_id(config: RunnableConfig) -> int:
+    """The calling client for this run. Fails closed: no client, no data access."""
+    api_client_id = (config.get("configurable") or {}).get(API_CLIENT_ID_KEY)
+    if not isinstance(api_client_id, int):
+        raise RuntimeError("weather tool invoked without an authenticated API client")
+    return api_client_id
+
 
 @tool(parse_docstring=True)
 async def get_current_weather(
     city: Annotated[str, Field(min_length=1, max_length=100)],
     country_code: Annotated[str, Field(pattern=r"^[A-Za-z]{2}$")] = "KE",
+    *,
+    config: RunnableConfig,
 ) -> dict[str, Any]:
     """Get the current weather for a city.
 
@@ -20,8 +40,13 @@ async def get_current_weather(
         city: Name of the city, e.g. "Nairobi".
         country_code: ISO 3166-1 alpha-2 country code of the city, e.g. "KE".
     """
+    # Recorded under the calling client, like GET /weather, so the lookup shows up
+    # in that client's history (and only theirs).
+    api_client_id = _api_client_id(config)
     try:
-        result = await get_weather_for_city(city=city, country_code=country_code)
+        result = await get_weather_for_city(
+            city=city, country_code=country_code, api_client_id=api_client_id
+        )
     except LocationNotFoundError as exc:
         return {"error": str(exc)}
     except UpstreamServiceError as exc:
@@ -35,13 +60,15 @@ async def get_current_weather(
 @tool(parse_docstring=True)
 async def list_weather_history(
     limit: Annotated[int, Field(ge=1, le=20)] = 5,
+    *,
+    config: RunnableConfig,
 ) -> list[dict[str, Any]]:
-    """List recent weather lookups previously saved by this service, newest first.
+    """List this user's recent weather lookups, newest first.
 
     Args:
         limit: Maximum number of lookups to return (1-20).
     """
-    items = await get_weather_history(limit=limit)
+    items = await get_weather_history(api_client_id=_api_client_id(config), limit=limit)
     return [
         {
             "location": _place(item.location),
