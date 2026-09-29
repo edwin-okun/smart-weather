@@ -311,6 +311,13 @@ Settings are read from environment variables or `.env`.
 | `AUTHORIZATION_CODE_TTL_SECONDS` | `300` | Authorization code lifetime |
 | `REFRESH_TOKEN_TTL_SECONDS` | `2592000` | Rotating refresh token lifetime |
 | `PUBLIC_BASE_URL` | unset | Trusted external OAuth origin when deployed behind a proxy |
+| `AI_MODEL` | `openai:gpt-4o-mini` | LangChain `provider:model` string for the `/ai/ask` agent |
+| `OPENAI_API_KEY` | unset | API key for `openai:` models (`AI_API_KEY` overrides it for any provider) |
+| `LANGSMITH_TRACING` | `false` | Send agent traces to LangSmith |
+| `LANGSMITH_API_KEY` | unset | LangSmith API key; tracing stays off without it |
+| `LANGSMITH_PROJECT` | `smart-weather` | LangSmith project that receives traces |
+| `LANGSMITH_ENDPOINT` | unset | Set for the EU region (`https://eu.api.smith.langchain.com`) or self-hosted |
+| `LANGSMITH_HIDE_INPUTS` / `LANGSMITH_HIDE_OUTPUTS` | `false` | Redact question and answer content in traces |
 
 Example local `.env`:
 
@@ -321,6 +328,21 @@ ACCESS_TOKEN_TTL_SECONDS=900
 REFRESH_TOKEN_TTL_SECONDS=2592000
 PUBLIC_BASE_URL=https://weather.example.com
 ```
+
+### LangSmith tracing
+
+Traces show each model call, tool call, token count and latency for `/ai/ask`,
+tagged with `client_id` and `ai_model`. To enable them, create an API key at
+[smith.langchain.com](https://smith.langchain.com) and add to `.env`:
+
+```dotenv
+LANGSMITH_TRACING=true
+LANGSMITH_API_KEY=<your key>
+```
+
+Traces include the user's question and the model's answer. Set
+`LANGSMITH_HIDE_INPUTS=true` and `LANGSMITH_HIDE_OUTPUTS=true` if that is
+sensitive. Pending traces are flushed on shutdown.
 
 ## Development Notes
 

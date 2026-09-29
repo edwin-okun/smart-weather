@@ -68,7 +68,8 @@ async def ask_weather_assistant(
                 config={
                     "recursion_limit": settings.ai_max_steps,
                     "run_name": "ask_weather_assistant",
-                    "metadata": {"client_id": client.client_id},
+                    "tags": ["smart-weather"],
+                    "metadata": {"client_id": client.client_id, "ai_model": settings.ai_model},
                 },
             )
     except TimeoutError as exc:
