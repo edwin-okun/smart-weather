@@ -267,6 +267,19 @@ class AskWeatherAssistantTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertNotIn("sk-secret", str(ctx.exception))
 
+    async def test_model_setup_failure_raises_generic_error(self) -> None:
+        # e.g. no API key configured: the provider SDK raises while building the model.
+        with (
+            patch.object(
+                ai_service, "get_chat_model", side_effect=openai.OpenAIError("api_key must be set")
+            ),
+            self.assertLogs(ai_service.logger, "ERROR"),
+            self.assertRaises(AIUpstreamError),
+        ):
+            await ai_service.ask_weather_assistant("How is Nairobi?", _client(WEATHER_READ))
+
+        self.assertFalse(ai_service._run_slots().locked())
+
     async def test_run_timeout_raises(self) -> None:
         with (
             patch.object(ai_service.settings, "ai_request_timeout", 0.05),

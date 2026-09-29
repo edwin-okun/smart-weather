@@ -100,10 +100,11 @@ async def ask_weather_assistant(
         )
         raise AIRateLimitError("AI assistant is busy, retry later")
 
-    agent = _get_agent(frozenset(client.scopes) & TOOL_REQUIRED_SCOPES)
     started = time.perf_counter()
 
     try:
+        # Inside the try: building the model can fail too (e.g. a missing API key).
+        agent = _get_agent(frozenset(client.scopes) & TOOL_REQUIRED_SCOPES)
         async with slots, asyncio.timeout(settings.ai_request_timeout):
             state = await agent.ainvoke(
                 {"messages": [{"role": "user", "content": question}]},
