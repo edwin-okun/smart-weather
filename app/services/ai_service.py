@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import math
 import time
 from datetime import date
 from functools import lru_cache
@@ -12,7 +13,7 @@ from langgraph.errors import GraphRecursionError
 from app.ai.models import get_chat_model
 from app.ai.tools import TOOL_REQUIRED_SCOPES, build_tools
 from app.config import settings
-from app.exceptions import AIStepLimitError, AITimeoutError, AIUpstreamError
+from app.exceptions import AIRateLimitError, AIStepLimitError, AITimeoutError, AIUpstreamError
 from app.schemas.ai import AskResponse, TokenUsage, ToolCall
 from app.schemas.auth import AuthenticatedClient
 
@@ -44,6 +45,37 @@ def _on_tool_error(exc: Exception, request: ToolCallRequest) -> str:
 
 
 @lru_cache
+def _run_slots() -> asyncio.Semaphore:
+    return asyncio.Semaphore(settings.ai_max_concurrency)
+
+
+def _provider_rate_limit(exc: BaseException) -> AIRateLimitError | None:
+    """Recognise a transient provider 429 without importing any provider SDK.
+
+    Provider SDKs (OpenAI, Anthropic, Google, ...) expose `status_code` on their
+    HTTP errors, and LangChain re-raises them wrapped, so walk the cause chain.
+    A 429 with code `insufficient_quota` is a billing problem, not a transient
+    limit, so it is left to the generic upstream-error path.
+    """
+    seen = 0
+    while exc is not None and seen < 5:
+        if getattr(exc, "status_code", None) == 429:
+            if getattr(exc, "code", None) == "insufficient_quota":
+                return None
+            headers = getattr(getattr(exc, "response", None), "headers", None) or {}
+            try:
+                retry_after = int(math.ceil(float(headers.get("retry-after", 1))))
+            except (TypeError, ValueError):
+                retry_after = 1
+            return AIRateLimitError(
+                "AI provider is rate limited, retry later", retry_after=min(max(retry_after, 1), 60)
+            )
+        exc = exc.__cause__ or exc.__context__
+        seen += 1
+    return None
+
+
+@lru_cache
 def _get_agent(tool_scopes: frozenset[str]):
     """Compile the agent once per distinct tool set; compiled agents are stateless."""
     return create_agent(
@@ -58,11 +90,21 @@ async def ask_weather_assistant(
     question: str, client: AuthenticatedClient
 ) -> AskResponse:
     """Answer a natural-language question, calling weather tools as needed."""
+    slots = _run_slots()
+    # No await between this check and the acquire below, so the check is race-free.
+    if slots.locked():
+        logger.warning(
+            "AI concurrency cap (%d) reached, rejecting client=%s",
+            settings.ai_max_concurrency,
+            client.client_id,
+        )
+        raise AIRateLimitError("AI assistant is busy, retry later")
+
     agent = _get_agent(frozenset(client.scopes) & TOOL_REQUIRED_SCOPES)
     started = time.perf_counter()
 
     try:
-        async with asyncio.timeout(settings.ai_request_timeout):
+        async with slots, asyncio.timeout(settings.ai_request_timeout):
             state = await agent.ainvoke(
                 {"messages": [{"role": "user", "content": question}]},
                 config={
@@ -79,6 +121,9 @@ async def ask_weather_assistant(
         logger.warning("AI agent run hit the step limit (%d)", settings.ai_max_steps)
         raise AIStepLimitError("AI agent could not finish within the step limit") from exc
     except Exception as exc:  # provider SDKs raise their own error hierarchies
+        if (rate_limited := _provider_rate_limit(exc)) is not None:
+            logger.warning("AI provider rate limit hit, retry_after=%ds", rate_limited.retry_after)
+            raise rate_limited from exc
         logger.exception("AI agent run failed")
         raise AIUpstreamError("AI agent run failed") from exc
 

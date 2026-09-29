@@ -320,6 +320,7 @@ Settings are read from environment variables or `.env`. Copy `.env.example` to `
 | `AI_MAX_RETRIES` | `2` | Per model call retries |
 | `AI_REQUEST_TIMEOUT` | `60.0` | Timeout for the whole `/ai/ask` run in seconds |
 | `AI_MAX_STEPS` | `8` | Agent recursion limit (each model call and tool round is one step) |
+| `AI_MAX_CONCURRENCY` | `10` | Max concurrent `/ai/ask` runs per process; excess requests get `429` |
 | `LANGSMITH_TRACING` | `false` | Send agent traces to LangSmith |
 | `LANGSMITH_API_KEY` | unset | LangSmith API key; tracing stays off without it |
 | `LANGSMITH_PROJECT` | `smart-weather` | LangSmith project that receives traces |
