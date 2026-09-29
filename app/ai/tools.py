@@ -35,13 +35,23 @@ async def get_current_weather(
 @tool(parse_docstring=True)
 async def list_weather_history(
     limit: Annotated[int, Field(ge=1, le=20)] = 5,
+    city: Annotated[str | None, Field(min_length=1, max_length=100)] = None,
+    country_code: Annotated[str | None, Field(pattern=r"^[A-Za-z]{2}$")] = None,
 ) -> list[dict[str, Any]]:
     """List recent weather lookups previously saved by this service, newest first.
 
+    These are past readings only, not current conditions: to compare an earlier
+    lookup with now, also call get_current_weather.
+
     Args:
         limit: Maximum number of lookups to return (1-20).
+        city: Only return lookups for this city (case-insensitive), e.g. "Nairobi".
+            Use it when the question is about one city's earlier lookups.
+        country_code: Only return lookups in this ISO 3166-1 alpha-2 country, e.g.
+            "FR". Pass it with city when the name exists in several countries,
+            e.g. Paris, France vs Paris, Texas (US).
     """
-    items = await get_weather_history(limit=limit)
+    items = await get_weather_history(limit=limit, city=city, country_code=country_code)
     return [
         {
             "location": _place(item.location),
