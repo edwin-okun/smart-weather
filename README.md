@@ -1,8 +1,9 @@
 # smart-weather
 
 `smart-weather` is a small FastAPI service that returns current weather for a
-city, stores successful lookups in SQLite, and exposes the same core operations
-as MCP tools.
+city, keeps a per-client history of successful lookups in SQLite, answers
+natural-language weather questions with an LLM agent, and exposes the core
+weather operations as MCP tools.
 
 It is intentionally compact, but it includes production-shaped concerns:
 OAuth-style API access, hashed secrets and tokens, scoped permissions, async
@@ -13,12 +14,15 @@ review in an interview.
 
 - Finds a city through the Open-Meteo geocoding API.
 - Fetches current weather from Open-Meteo without requiring a weather API key.
-- Saves successful lookups to SQLite with Tortoise ORM.
+- Saves successful lookups to SQLite with Tortoise ORM, scoped to the client
+  that made them and kept for a configurable retention window.
+- Answers weather questions through an LLM agent at `POST /ai/ask`.
 - Protects weather routes with short-lived bearer tokens.
 - Supports OAuth client credentials, authorization code with PKCE, and
   RFC 7591 Dynamic Client Registration.
 - Publishes RFC 9728 MCP resource metadata and rotates opaque refresh tokens.
 - Mounts FastAPI routes as MCP tools at `/mcp`.
+- Manages the schema with versioned Tortoise ORM migrations.
 
 ## Quick Start
 
@@ -37,8 +41,11 @@ uv run smart-weather migrate
 uv run fastapi dev
 ```
 
-`migrate` creates or upgrades the SQLite database at `DATABASE_URL`; see
-[Database Migrations](#database-migrations).
+`uv sync` installs the `smart-weather` command. `migrate` creates or upgrades
+the SQLite database at `DATABASE_URL`; see
+[Database Migrations](#database-migrations). If you already have a database
+from before migrations were added, follow
+[Adopting an Existing Database](#adopting-an-existing-database) instead.
 
 The API runs at:
 
@@ -62,7 +69,8 @@ In a second terminal, create a local client:
 uv run smart-weather create-client --name local-dev
 ```
 
-The command prints a `client_id` and one-time `client_secret`.
+The command prints a `client_id` and one-time `client_secret`. Without
+`--scope`, the client gets `weather:read` and `weather:history:read`.
 Save both values locally:
 
 ```bash
@@ -97,11 +105,29 @@ curl "http://localhost:8000/weather?city=Nairobi" \
   -H "Authorization: Bearer $ACCESS_TOKEN"
 ```
 
-View saved lookups:
+View your own saved lookups:
 
 ```bash
 curl "http://localhost:8000/weather/history?limit=10" \
   -H "Authorization: Bearer $ACCESS_TOKEN"
+```
+
+### 6. Ask the Weather Assistant (Optional)
+
+`/ai/ask` calls a paid LLM, so it needs an API key (`OPENAI_API_KEY` by
+default) and a client created with the `ai:ask` scope:
+
+```bash
+uv run smart-weather create-client --name local-ai --scope weather:read --scope ai:ask
+```
+
+Request a token for that client with `scope=ai:ask`, then:
+
+```bash
+curl -X POST "http://localhost:8000/ai/ask" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"question": "Is it warmer in Nairobi or Mombasa right now?"}'
 ```
 
 ## API Overview
@@ -111,6 +137,7 @@ curl "http://localhost:8000/weather/history?limit=10" \
 | `GET /health` | Public | Service health check |
 | `GET /weather?city=Nairobi&country_code=KE` | `weather:read` | Fetch current weather and save the lookup under the calling client |
 | `GET /weather/history?limit=20` | `weather:history:read` | List the calling client's own lookups from the last `WEATHER_HISTORY_RETENTION_DAYS` (default 30) days |
+| `POST /ai/ask` | `ai:ask` | Answer a weather question with an LLM agent; its lookups are saved under the calling client |
 | `GET /authorize` | Public | Start OAuth authorization-code flow with PKCE |
 | `POST /register` | Public | Dynamically register an OAuth PKCE client |
 | `POST /oauth/token` | Public | Exchange client credentials or authorization code for a bearer token |
@@ -131,13 +158,16 @@ The app keeps framework, business, and persistence concerns separated:
 - `app/clients.py` contains the Open-Meteo HTTP client.
 - `app/dependencies.py` contains auth dependencies and scope enforcement.
 - `app/security.py` contains token generation, hashing, and PKCE helpers.
-- `app/cli.py` contains local administration commands.
+- `app/ai/` contains the `/ai/ask` agent: model setup, tools, and tracing.
+- `app/migrations/` contains versioned Tortoise ORM migrations.
+- `app/cli.py` contains the `smart-weather` administration commands.
 
 Request flow for `GET /weather`:
 
 ```text
 router -> auth dependency -> weather service -> Open-Meteo client
-       -> weather repository -> SQLite -> response schema
+       -> weather repository (save under the client, prune expired rows)
+       -> SQLite -> response schema
 ```
 
 ## Authentication
@@ -156,12 +186,20 @@ Security behavior:
 - Access tokens and authorization codes are opaque and stored only as hashes.
 - Access tokens are short lived. The default TTL is `900` seconds.
 - Authorization codes are short lived. The default TTL is `300` seconds.
+- Authorization codes are single use, even under concurrent requests: the code
+  is claimed and its tokens are issued in one transaction. A failed PKCE check
+  does not use up the code.
 - Disabled clients and rotated secrets revoke active tokens for that client.
+- Weather history is private to each client. A client never sees another
+  client's lookups.
 
 Available scopes:
 
-- `weather:read`
-- `weather:history:read`
+| Scope | Grants | Self-registration |
+| --- | --- | --- |
+| `weather:read` | `GET /weather` | Allowed (the default) |
+| `weather:history:read` | `GET /weather/history` | Allowed, when requested |
+| `ai:ask` | `POST /ai/ask` (spends LLM budget) | Not allowed; admin-created clients only |
 
 ### Dynamic Client Registration
 
@@ -189,7 +227,12 @@ receive no client secret. Registrations using `client_secret_post` or
 All authorization-code clients use S256 PKCE. Loopback redirect URIs registered
 without a port accept a dynamic port during authorization. If `scope` is
 omitted or blank, the client receives only `weather:read`; access to weather
-history must be requested explicitly.
+history must be requested explicitly. Requesting a scope outside
+`DYNAMIC_REGISTRATION_ALLOWED_SCOPES` (by default `weather:read` and
+`weather:history:read`) is rejected with `invalid_client_metadata`, so an
+anonymous caller cannot grant itself `ai:ask`. The authorization-server
+metadata advertises exactly the scopes registration allows. Give `ai:ask` to
+trusted clients with `smart-weather create-client --scope ai:ask`.
 
 OpenWebUI-compatible registration may request:
 
@@ -206,8 +249,10 @@ OpenWebUI-compatible registration may request:
 
 Authorization-code exchanges return both an access token and a refresh token.
 Refresh tokens are opaque, stored only as hashes, single use, and rotated on
-every successful `grant_type=refresh_token` request. Replaying an old refresh
-token revokes its active token family.
+every successful `grant_type=refresh_token` request. Each authorization-code
+exchange starts a token family. Replaying an old refresh token revokes that
+family's refresh and access tokens, while the client's other sessions keep
+working.
 
 Registration is intentionally unauthenticated. For an internet-facing
 deployment, protect `/register` with deployment-level rate limiting and
@@ -291,7 +336,8 @@ Use the same bearer token as the HTTP API:
 Authorization: Bearer $ACCESS_TOKEN
 ```
 
-Available MCP tools are generated from OpenAPI operation IDs:
+Available MCP tools are generated from OpenAPI operation IDs. Each tool
+requires the same scope as its route:
 
 - `get_weather`
 - `list_weather_history`
@@ -299,7 +345,8 @@ Available MCP tools are generated from OpenAPI operation IDs:
 
 The authorization, token, and dynamic registration operations are
 intentionally excluded from generated MCP tools because they are OAuth
-protocol endpoints rather than weather tools.
+protocol endpoints rather than weather tools. `ask_weather_assistant`
+(`/ai/ask`) is also excluded.
 
 ## Configuration
 
@@ -315,6 +362,9 @@ Settings are read from environment variables or `.env`. Copy `.env.example` to `
 | `ACCESS_TOKEN_TTL_SECONDS` | `900` | Bearer token lifetime |
 | `AUTHORIZATION_CODE_TTL_SECONDS` | `300` | Authorization code lifetime |
 | `REFRESH_TOKEN_TTL_SECONDS` | `2592000` | Rotating refresh token lifetime |
+| `DYNAMIC_REGISTRATION_ALLOWED_SCOPES` | `["weather:history:read","weather:read"]` | Scopes `POST /register` may grant, as a JSON list |
+| `WEATHER_HISTORY_RETENTION_DAYS` | `30` | Days a lookup stays in history |
+| `WEATHER_HISTORY_PRUNE_BATCH_SIZE` | `500` | Max expired lookups deleted each time a lookup is saved |
 | `PUBLIC_BASE_URL` | unset | Trusted external OAuth origin when deployed behind a proxy |
 | `AI_MODEL` | `openai:gpt-4o-mini` | LangChain `provider:model` string for the `/ai/ask` agent |
 | `OPENAI_API_KEY` | unset | API key for `openai:` models |
@@ -360,9 +410,9 @@ sensitive. Pending traces are flushed on shutdown.
 ## Database Migrations
 
 The schema is managed by Tortoise ORM's built-in migrations in
-`app/migrations/`. The app no longer creates tables at startup:
-`GENERATE_DB_SCHEMAS` now defaults to `false`, because it only creates missing
-tables and never alters existing ones.
+`app/migrations/`. The app does not create tables at startup by default:
+`GENERATE_DB_SCHEMAS` is `false`, because it only creates missing tables and
+never alters existing ones.
 
 Apply pending migrations (safe to re-run; it only moves forward):
 
@@ -388,6 +438,11 @@ Other Tortoise commands use the same config: `history` (applied), `heads`
 (latest on disk) and `downgrade models <name>` (roll back to that migration).
 `tests/test_migrations.py` fails if the models and migrations disagree.
 
+On SQLite, check generated migrations carefully. Tortoise 1.1.8 does not
+create the index for a newly added indexed field, and some changes rebuild the
+whole table and lose its other indexes. `0002_token_family_and_client_history`
+works around this with small operation subclasses you can reuse.
+
 ### Adopting an Existing Database
 
 Databases created before migrations existed were built by
@@ -397,17 +452,20 @@ schema the database already has as applied without running it (`--fake`),
 and apply the rest:
 
 ```bash
-# Database created from main before migrations (no access_tokens.family_id):
+# Created before migrations existed (no access_tokens.family_id column):
 uv run smart-weather migrate 0001_initial --fake
 uv run smart-weather migrate
 
-# Database already created from these models (has family_id and weather_lookups.client_id):
+# Created with GENERATE_DB_SCHEMAS from the current models
+# (already has access_tokens.family_id and weather_lookups.client_id):
 uv run smart-weather migrate --fake
 ```
 
 `uv run python -m tortoise -c app.db.TORTOISE_ORM history` shows what is
 recorded. Only use `--fake` for migrations whose changes the database already
-has.
+has. Lookups saved before history was scoped have no client, so they no
+longer appear in anyone's history and are deleted once they pass the
+retention window.
 
 ## Development Notes
 
@@ -420,7 +478,8 @@ experiments, point `DATABASE_URL` at another SQLite path:
 DATABASE_URL=sqlite:///tmp/smart_weather_dev.sqlite3 RUN_DB_MIGRATIONS_ON_STARTUP=true uv run fastapi dev
 ```
 
-Run the tests (in-memory SQLite, no network):
+Run the tests (in-memory SQLite, no network; pytest is in the `dev` dependency
+group that `uv sync` installs):
 
 ```bash
 uv run pytest
@@ -453,4 +512,6 @@ This project is meant to be easy to inspect quickly:
 - External API access is isolated in `app/clients.py`.
 - Persistence is behind repository functions.
 - Auth logic is explicit, scoped, and testable without being hidden in a third-party provider.
+- Races and replays are covered by tests: concurrent code redemption,
+  refresh-token replay across sessions, and cross-client history access.
 - MCP support is mounted from the same FastAPI app instead of being a separate service.
