@@ -13,6 +13,15 @@ class Settings(BaseSettings):
     refresh_token_ttl_seconds: int = 2_592_000
     public_base_url: str | None = None
 
+    # AI: LangChain "provider:model" string; api key falls back to openai_api_key
+    # for openai models.
+    ai_model: str = "openai:gpt-4o-mini"
+    ai_api_key: str | None = None
+    ai_temperature: float = 0.0
+    ai_timeout: float = 60.0
+    ai_max_retries: int = 3
+    ai_max_steps: int = 8
+
     # api keys
     openai_api_key: str | None = None
 
