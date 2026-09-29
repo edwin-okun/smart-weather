@@ -299,7 +299,7 @@ protocol endpoints rather than weather tools.
 
 ## Configuration
 
-Settings are read from environment variables or `.env`.
+Settings are read from environment variables or `.env`. Copy `.env.example` to `.env` to start; it lists every variable.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
