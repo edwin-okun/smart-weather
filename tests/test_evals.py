@@ -135,6 +135,14 @@ class BackendTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([i.location.name for i in items], ["Nairobi"])
         self.assertEqual(items[0].weather["current"]["temperature_2m"], 14.2)
 
+    async def test_history_country_filter_separates_duplicate_city_names(self) -> None:
+        backend = self._backend(history="paris_both")
+        # Paris, Texas is newer, so a city-only filter returns it first.
+        [newest] = await backend.get_weather_history(limit=1, city="Paris")
+        self.assertEqual(newest.country_code, "US")
+        [france] = await backend.get_weather_history(limit=1, city="Paris", country_code="fr")
+        self.assertEqual((france.country_code, france.weather["current"]["temperature_2m"]), ("FR", 12.5))
+
     async def test_patched_service_refuses_without_active_backend(self) -> None:
         with self.assertRaises(RuntimeError):
             await _fake_get_weather_for_city("Nairobi")
@@ -318,7 +326,8 @@ class RunCaseTests(unittest.IsolatedAsyncioTestCase):
         broken = FakeJudge(messages=iter([]))
         with patch.object(eval_run, "judge_answer", AsyncMock(side_effect=RuntimeError("judge down"))):
             result = await self._run_case(self._sf_model(), judge=broken)
-        self.assertEqual(result.status, "pass")
+        # Code checks passed but the judged evaluation never finished: not a pass.
+        self.assertEqual((result.status, result.error["kind"]), ("error", "judge"))
         self.assertIn("judge down", result.judge["error"])
 
     async def test_rate_limit_is_retried_once_then_recorded_as_error(self) -> None:
@@ -383,7 +392,20 @@ class MainTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report["summary"]["by_category"]["off_topic"]["pass_rate"], 1.0)
         self.assertIn("Pass rate: 100%", markdown)
 
+    def test_gate_fails_on_errors_and_unscored_runs(self) -> None:
+        # One pass and one provider error: the pass rate is 100% but the case never ran.
+        summary = aggregate([_run("a"), _run("b", status="error", error={"kind": "upstream", "message": "502"})])
+        self.assertEqual(summary["pass_rate"], 1.0)
+        self.assertEqual(eval_run.gate_failures(summary, 0.9, max_errors=0), ["1 run(s) errored; --max-errors is 0"])
+        self.assertEqual(eval_run.gate_failures(summary, 0.9, max_errors=1), [])
+
+        all_errors = aggregate([_run("a", status="error", error={"kind": "timeout", "message": "t"})])
+        self.assertIn("No runs were scored", eval_run.gate_failures(all_errors, 0.0, max_errors=5))
+
+        failing = aggregate([_run("a"), _run("b", status="fail", checks=[Check("tool_selection", False)])])
+        self.assertEqual(eval_run.gate_failures(failing, 0.9, max_errors=0), ["Pass rate 50.0% is below --fail-under 90.0%"])
+
     def test_arguments_are_validated(self) -> None:
-        for argv in (["--fail-under", "80"], ["--repeat", "0"], ["--concurrency", "0"]):
+        for argv in (["--fail-under", "80"], ["--repeat", "0"], ["--concurrency", "0"], ["--max-errors", "-1"]):
             with self.subTest(argv), patch("sys.stderr"), self.assertRaises(SystemExit):
                 eval_run.parse_args(argv)

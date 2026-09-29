@@ -52,12 +52,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--no-judge", action="store_true", help="code checks only")
     parser.add_argument("--out", type=Path, help="report JSON path; a .md is written next to it")
     parser.add_argument("--fail-under", type=float, metavar="RATE", help="exit 1 if the pass rate (0-1) is below RATE")
+    parser.add_argument(
+        "--max-errors",
+        type=int,
+        default=0,
+        metavar="N",
+        help="with --fail-under, also exit 1 if more than N runs errored (default 0)",
+    )
     parser.add_argument("-v", "--verbose", action="store_true", help="show app warnings and tool error tracebacks")
     args = parser.parse_args(argv)
     for name in ("limit", "repeat", "concurrency"):
         value = getattr(args, name)
         if value is not None and value < 1:
             parser.error(f"--{name} must be at least 1")
+    if args.max_errors < 0:
+        parser.error("--max-errors must be at least 0")
     if args.fail_under is not None and not 0 <= args.fail_under <= 1:
         parser.error("--fail-under must be between 0 and 1")
     return args
@@ -138,8 +147,11 @@ async def run_case(
                 verdict, result.judge_usage = await judge_answer(
                     judge, dataset, case, response.answer, result.tool_results, today
                 )
-        except Exception as exc:  # a judge failure must not sink the run
-            result.judge = {"error": f"{type(exc).__name__}: {exc}"[:300]}
+        except Exception as exc:  # a judge failure must not crash the whole eval
+            message = f"{type(exc).__name__}: {exc}"[:300]
+            result.judge = {"error": message}
+            # The run was not fully evaluated, so it is an error rather than a pass.
+            result.error = {"kind": "judge", "message": message}
         else:
             result.judge = verdict.model_dump()
             result.checks.append(Check("judge", verdict.verdict == "pass", verdict.reason))
@@ -233,11 +245,26 @@ async def main_async(args: argparse.Namespace) -> int:
     if tracing:
         await asyncio.to_thread(flush_traces)
 
-    pass_rate = report["summary"]["pass_rate"]
-    if args.fail_under is not None and pass_rate < args.fail_under:
-        print(f"Pass rate {pass_rate:.1%} is below --fail-under {args.fail_under:.1%}", file=sys.stderr)
-        return 1
+    if args.fail_under is not None:
+        problems = gate_failures(report["summary"], args.fail_under, args.max_errors)
+        for problem in problems:
+            print(problem, file=sys.stderr)
+        if problems:
+            return 1
     return 0
+
+
+def gate_failures(summary: dict[str, Any], fail_under: float, max_errors: int) -> list[str]:
+    """Why a CI gate fails. The pass rate leaves errored runs out, so errors are
+    gated separately: otherwise a provider outage could pass the gate unrun."""
+    problems = []
+    if summary["scored"] == 0:
+        problems.append("No runs were scored")
+    elif summary["pass_rate"] < fail_under:
+        problems.append(f"Pass rate {summary['pass_rate']:.1%} is below --fail-under {fail_under:.1%}")
+    if summary["errors"] > max_errors:
+        problems.append(f"{summary['errors']} run(s) errored; --max-errors is {max_errors}")
+    return problems
 
 
 def main(argv: list[str] | None = None) -> int:
