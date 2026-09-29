@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     ai_temperature: float = 0.0
     ai_max_output_tokens: int = 1024
     ai_timeout: float = 30.0
-    ai_max_retries: int = 2
+    ai_max_retries: int = 1
     ai_request_timeout: float = 60.0
     ai_max_steps: int = 8
     # Max /ai/ask runs in flight per process. Each run makes several model calls
