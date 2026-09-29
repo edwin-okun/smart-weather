@@ -645,15 +645,17 @@ async def _issue_access_and_refresh_token(
     access_token = generate_access_token()
     refresh_token = generate_refresh_token()
     now = utc_now()
+    family_id = generate_token_family_id()
     await create_access_token(
         token_hash=hash_token(access_token),
         client=client,
         scopes=scopes,
         expires_at=now + timedelta(seconds=settings.access_token_ttl_seconds),
+        family_id=family_id,
     )
     await create_refresh_token(
         token_hash=hash_token(refresh_token),
-        family_id=generate_token_family_id(),
+        family_id=family_id,
         client=client,
         scopes=scopes,
         expires_at=now + timedelta(seconds=settings.refresh_token_ttl_seconds),

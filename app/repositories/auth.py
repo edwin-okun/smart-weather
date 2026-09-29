@@ -103,10 +103,12 @@ async def create_access_token(
     client: ApiClient,
     scopes: list[str],
     expires_at: datetime,
+    family_id: str | None = None,
     using_db: BaseDBAsyncClient | None = None,
 ) -> AccessToken:
     return await AccessToken.create(
         token_hash=token_hash,
+        family_id=family_id,
         client=client,
         scopes=scopes,
         expires_at=expires_at,
@@ -186,7 +188,7 @@ async def rotate_refresh_token(
                 revoked_at__isnull=True,
             ).using_db(connection).update(revoked_at=rotated_at)
             await AccessToken.filter(
-                client=current.client,
+                family_id=current.family_id,
                 revoked_at__isnull=True,
             ).using_db(connection).update(revoked_at=rotated_at)
             return "replayed", None
@@ -204,7 +206,7 @@ async def rotate_refresh_token(
                 revoked_at__isnull=True,
             ).using_db(connection).update(revoked_at=rotated_at)
             await AccessToken.filter(
-                client=current.client,
+                family_id=current.family_id,
                 revoked_at__isnull=True,
             ).using_db(connection).update(revoked_at=rotated_at)
             return "replayed", None
@@ -213,6 +215,7 @@ async def rotate_refresh_token(
             client=current.client,
             scopes=scopes,
             expires_at=access_expires_at,
+            family_id=current.family_id,
             using_db=connection,
         )
         replacement = await create_refresh_token(
