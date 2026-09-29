@@ -426,6 +426,13 @@ Run the tests (in-memory SQLite, no network):
 uv run pytest
 ```
 
+Evaluate the `/ai/ask` agent's answer quality (real model calls, which cost
+money; weather data comes from fixtures). See [evals/README.md](evals/README.md):
+
+```bash
+uv run python -m evals.run --cases 'cw-*' --no-judge
+```
+
 Run the CLI help:
 
 ```bash

@@ -40,7 +40,13 @@ async def get_weather_for_city(
     return WeatherResponse(location=location, weather=forecast_data)
 
 
-async def get_weather_history(*, api_client_id: int, limit: int = 20) -> list[WeatherHistoryItem]:
+async def get_weather_history(
+    *,
+    api_client_id: int,
+    limit: int = 20,
+    city: str | None = None,
+    country_code: str | None = None,
+) -> list[WeatherHistoryItem]:
     """The calling client's own lookups within the retention window, newest first."""
     # Filtering on the cutoff here means correctness never depends on when the
     # prune last ran.
@@ -48,6 +54,8 @@ async def get_weather_history(*, api_client_id: int, limit: int = 20) -> list[We
         api_client_id=api_client_id,
         created_after=history_cutoff(),
         limit=limit,
+        city=city,
+        country_code=country_code,
     )
     return [
         WeatherHistoryItem(

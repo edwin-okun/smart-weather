@@ -135,6 +135,17 @@ class ToolTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
+    async def test_history_filters_are_passed_to_the_service(self) -> None:
+        with patch("app.ai.tools.get_weather_history", AsyncMock(return_value=[])) as fetch:
+            await list_weather_history.ainvoke(
+                {"city": "Paris", "country_code": "FR", "limit": 20}, CLIENT_CONFIG
+            )
+
+        fetch.assert_awaited_once_with(api_client_id=1, limit=20, city="Paris", country_code="FR")
+
+        with self.assertRaises(ValidationError):
+            await list_weather_history.ainvoke({"city": "Paris", "country_code": "France"}, CLIENT_CONFIG)
+
     async def test_history_is_trimmed(self) -> None:
         item = WeatherHistoryItem(
             id=1,
@@ -147,7 +158,7 @@ class ToolTests(unittest.IsolatedAsyncioTestCase):
         with patch("app.ai.tools.get_weather_history", AsyncMock(return_value=[item])) as fetch:
             result = await list_weather_history.ainvoke({"limit": 3}, CLIENT_CONFIG)
 
-        fetch.assert_awaited_once_with(api_client_id=1, limit=3)
+        fetch.assert_awaited_once_with(api_client_id=1, limit=3, city=None, country_code=None)
         self.assertEqual(result[0]["location"], "Nairobi, Kenya")
         self.assertEqual(result[0]["looked_up_at"], "2026-09-29T09:00:00+00:00")
         self.assertNotIn("elevation", str(result))

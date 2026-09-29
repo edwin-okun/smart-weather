@@ -242,6 +242,8 @@ class WeatherHistoryTests(unittest.TestCase):
             self.client.portal.call(ai_service.ask_weather_assistant, "What did I look up?", caller)
 
         self.assertIn((client_a, "Nairobi"), self.client.portal.call(_lookups))
-        history.assert_awaited_once_with(api_client_id=client_a, limit=5)
+        history.assert_awaited_once_with(
+            api_client_id=client_a, limit=5, city=None, country_code=None
+        )
         # The tool saw the lookup it just made, and none of client B's.
         self.assertEqual(seen_history, ["Nairobi"])

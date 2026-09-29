@@ -28,17 +28,20 @@ async def list_weather_lookups(
     api_client_id: int,
     created_after: datetime,
     limit: int = 20,
+    city: str | None = None,
+    country_code: str | None = None,
 ) -> list[WeatherLookup]:
     """Latest lookups made by one API client, newest first.
 
     Rows with a null client (recorded before history was client-scoped) never
     match, so they are visible to nobody.
     """
-    return (
-        await WeatherLookup.filter(client_id=api_client_id, created_at__gte=created_after)
-        .order_by("-created_at", "-id")
-        .limit(limit)
-    )
+    lookups = WeatherLookup.filter(client_id=api_client_id, created_at__gte=created_after)
+    if city is not None:
+        lookups = lookups.filter(city__iexact=city)
+    if country_code is not None:
+        lookups = lookups.filter(country_code=country_code.upper())
+    return await lookups.order_by("-created_at", "-id").limit(limit)
 
 
 async def delete_weather_lookups_before(cutoff: datetime, batch_size: int) -> int:
