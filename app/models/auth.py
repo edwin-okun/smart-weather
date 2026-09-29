@@ -25,6 +25,7 @@ class AccessToken(Model):
         related_name="access_tokens",
         on_delete=fields.CASCADE,
     )
+    family_id = fields.CharField(max_length=64, null=True, index=True)
     scopes = fields.JSONField(default=list)
     expires_at = fields.DatetimeField(index=True)
     revoked_at = fields.DatetimeField(null=True)

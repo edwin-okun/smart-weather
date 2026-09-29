@@ -136,12 +136,14 @@ def _backend() -> CaseBackend:
     return backend
 
 
-async def _fake_get_weather_for_city(city: str, country_code: str = "KE") -> WeatherResponse:
+async def _fake_get_weather_for_city(
+    city: str, country_code: str = "KE", *, api_client_id: int
+) -> WeatherResponse:
     return await _backend().get_weather_for_city(city=city, country_code=country_code)
 
 
 async def _fake_get_weather_history(
-    limit: int = 20, city: str | None = None, country_code: str | None = None
+    *, api_client_id: int, limit: int = 20, city: str | None = None, country_code: str | None = None
 ) -> list[WeatherHistoryItem]:
     return await _backend().get_weather_history(limit=limit, city=city, country_code=country_code)
 

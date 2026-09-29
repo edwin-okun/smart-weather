@@ -2,7 +2,7 @@ import argparse
 import asyncio
 import sys
 
-from app.db import close_db, init_db
+from app.db import PendingMigrationsError, close_db, init_db
 from app.permissions import ALL_SCOPES, WEATHER_HISTORY_READ, WEATHER_READ
 from app.services.auth import (
     add_api_client_redirect_uri,
@@ -75,6 +75,35 @@ async def _add_redirect_uri(args: argparse.Namespace) -> None:
     print(f"redirect_uris={','.join(redirect_uris)}")
 
 
+def _migrate(args: argparse.Namespace) -> int:
+    """Apply migrations forward via Tortoise's migration CLI; never rolls back."""
+    from tortoise.cli.cli import run_cli_async
+    from tortoise.exceptions import OperationalError
+
+    argv = ["-c", "app.db.TORTOISE_ORM", "upgrade"]
+    if args.target:
+        argv += ["models", args.target]
+    if args.fake:
+        argv.append("--fake")
+    if args.dry_run:
+        argv.append("--dry-run")
+    try:
+        return asyncio.run(run_cli_async(argv))
+    except OperationalError as exc:
+        print(f"\nmigration failed: {exc}", file=sys.stderr)
+        if "already exists" in str(exc):
+            print(
+                "This database has tables that were not created by migrations "
+                "(GENERATE_DB_SCHEMAS). Adopt it first: see 'Adopting an Existing "
+                "Database' in the README.",
+                file=sys.stderr,
+            )
+        return 1
+    except ValueError as exc:  # e.g. TARGET is already applied (would roll back)
+        print(f"migration failed: {exc}", file=sys.stderr)
+        return 1
+
+
 def main() -> None:
     """Run smart-weather administration commands."""
     parser = argparse.ArgumentParser(description="smart-weather administration")
@@ -114,7 +143,31 @@ def main() -> None:
 
     subparsers.add_parser("list-clients", help="List API clients without secrets")
 
+    migrate = subparsers.add_parser(
+        "migrate",
+        help="Apply pending database migrations",
+        description=(
+            "Apply pending migrations in app/migrations, up to TARGET if given "
+            "(e.g. 0001_initial). Only moves forward; to roll back use "
+            "`python -m tortoise -c app.db.TORTOISE_ORM downgrade models <name>`."
+        ),
+    )
+    migrate.add_argument("target", nargs="?", help="Last migration to apply")
+    migrate.add_argument(
+        "--fake",
+        action="store_true",
+        help=(
+            "Record the migrations as applied without running their SQL; for "
+            "adopting a database whose schema already matches them"
+        ),
+    )
+    migrate.add_argument(
+        "--dry-run", action="store_true", help="Show the plan without changing the database"
+    )
+
     args = parser.parse_args()
+    if args.command == "migrate":
+        raise SystemExit(_migrate(args))
     try:
         if args.command == "create-client":
             if not args.scope:
@@ -128,7 +181,7 @@ def main() -> None:
             asyncio.run(_add_redirect_uri(args))
         elif args.command == "list-clients":
             asyncio.run(_list_clients(args))
-    except ValueError as exc:
+    except (PendingMigrationsError, ValueError) as exc:
         print(str(exc), file=sys.stderr)
         raise SystemExit(1) from None
 

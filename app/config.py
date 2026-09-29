@@ -1,5 +1,7 @@
-from pydantic import PositiveInt
+from pydantic import PositiveInt, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from app.permissions import ALL_SCOPES, WEATHER_HISTORY_READ, WEATHER_READ
 
 
 class Settings(BaseSettings):
@@ -7,12 +9,33 @@ class Settings(BaseSettings):
 
     app_name: str = "smart-weather"
     database_url: str = "sqlite://smart_weather.sqlite3"
-    generate_db_schemas: bool = True
+    # Schema management. Migrations (app/migrations) are the source of truth;
+    # apply them with `smart-weather migrate` as a deploy step. Set
+    # run_db_migrations_on_startup to have each app process apply them itself
+    # (fine for a single process; racy with several workers or replicas).
+    # generate_db_schemas only creates missing tables and never alters existing
+    # ones, so keep it for throwaway databases such as tests.
+    run_db_migrations_on_startup: bool = False
+    generate_db_schemas: bool = False
     weather_client_timeout: float = 10.0
     access_token_ttl_seconds: int = 900
     authorization_code_ttl_seconds: int = 300
     refresh_token_ttl_seconds: int = 2_592_000
     public_base_url: str | None = None
+    # Scopes an unauthenticated client may request via dynamic client
+    # registration (POST /register); anything else is rejected with
+    # invalid_client_metadata. weather:history:read is safe to self-grant because
+    # history is scoped to the calling client. ai:ask spends the LLM budget, so
+    # grant it only to admin-created clients (app.cli create-client). A
+    # registration that names no scope still gets only weather:read.
+    # Set as JSON in the environment, e.g. '["weather:read"]'.
+    dynamic_registration_allowed_scopes: list[str] = [WEATHER_READ, WEATHER_HISTORY_READ]
+
+    # Weather history: each API client sees only its own lookups, for this many
+    # days. Older rows are hidden from history immediately and deleted in bounded
+    # batches (weather_history_prune_batch_size rows) each time a lookup is saved.
+    weather_history_retention_days: PositiveInt = 30
+    weather_history_prune_batch_size: PositiveInt = 500
 
     # AI: LangChain "provider:model" string; api key falls back to openai_api_key
     # for openai models. ai_timeout/ai_max_retries apply per model call, while
@@ -41,6 +64,14 @@ class Settings(BaseSettings):
     langsmith_endpoint: str | None = None
     langsmith_hide_inputs: bool = False
     langsmith_hide_outputs: bool = False
+
+    @field_validator("dynamic_registration_allowed_scopes")
+    @classmethod
+    def _known_scopes_only(cls, scopes: list[str]) -> list[str]:
+        unknown = set(scopes) - ALL_SCOPES
+        if unknown:
+            raise ValueError(f"unknown scopes: {', '.join(sorted(unknown))}")
+        return sorted(set(scopes))
 
     # api keys
     openai_api_key: str | None = None

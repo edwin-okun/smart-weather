@@ -165,9 +165,9 @@ class BackendTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_patched_service_refuses_without_active_backend(self) -> None:
         with self.assertRaises(RuntimeError):
-            await _fake_get_weather_for_city("Nairobi")
+            await _fake_get_weather_for_city("Nairobi", api_client_id=0)
         with use_backend(self._backend(fixtures=["nairobi"])):
-            self.assertEqual((await _fake_get_weather_for_city("Nairobi")).location.name, "Nairobi")
+            self.assertEqual((await _fake_get_weather_for_city("Nairobi", api_client_id=0)).location.name, "Nairobi")
 
 
 class MatcherTests(unittest.TestCase):
