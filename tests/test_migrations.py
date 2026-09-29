@@ -11,12 +11,17 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
+
+from fastapi.testclient import TestClient
 
 from tortoise.context import TortoiseContext
 from tortoise.migrations.api import migrate
 from tortoise.migrations.autodetector import MigrationAutodetector
 
 from app import db
+from app.config import settings
+from app.main import app
 
 
 BASELINE = "models.0001_initial"
@@ -151,6 +156,50 @@ class MigrationTests(unittest.TestCase):
         con = sqlite3.connect(path)
         self.assertEqual(con.execute("SELECT count(*) FROM weather_lookups").fetchone(), (1,))
         con.close()
+
+
+class StartupMigrationCheckTests(unittest.TestCase):
+    """Without schema generation, the app must not start on an unmigrated database."""
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.path = Path(tmp.name) / "app.sqlite3"
+        for patcher in (
+            patch.dict(db.TORTOISE_ORM["connections"], {"default": f"sqlite://{self.path}"}),
+            patch.object(settings, "generate_db_schemas", False),
+            patch.object(settings, "run_db_migrations_on_startup", False),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_startup_fails_while_migrations_are_pending(self) -> None:
+        for target, pending in [
+            (None, ["models.0001_initial", "models.0002_token_family_and_client_history"]),
+            (BASELINE, ["models.0002_token_family_and_client_history"]),
+        ]:
+            with self.subTest(migrated_to=target):
+                if target is not None:
+                    asyncio.run(_migrate(self.path, target=target))
+                with self.assertRaises(db.PendingMigrationsError) as raised:
+                    with TestClient(app):
+                        pass
+                self.assertEqual(raised.exception.pending, pending)
+                self.assertIn("smart-weather migrate", str(raised.exception))
+
+    def test_startup_serves_once_migrated(self) -> None:
+        asyncio.run(_migrate(self.path))
+        with TestClient(app) as client:
+            self.assertEqual(client.get("/health").status_code, 200)
+            response = client.post(
+                "/register", json={"redirect_uris": ["https://client.example/callback"]}
+            )
+        self.assertEqual(response.status_code, 201, response.text)
+
+    def test_startup_can_apply_migrations_itself(self) -> None:
+        with patch.object(settings, "run_db_migrations_on_startup", True):
+            with TestClient(app) as client:
+                self.assertEqual(client.get("/health").status_code, 200)
 
 
 if __name__ == "__main__":

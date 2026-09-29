@@ -2,7 +2,7 @@ import argparse
 import asyncio
 import sys
 
-from app.db import close_db, init_db
+from app.db import PendingMigrationsError, close_db, init_db
 from app.permissions import ALL_SCOPES, WEATHER_HISTORY_READ, WEATHER_READ
 from app.services.auth import (
     add_api_client_redirect_uri,
@@ -181,7 +181,7 @@ def main() -> None:
             asyncio.run(_add_redirect_uri(args))
         elif args.command == "list-clients":
             asyncio.run(_list_clients(args))
-    except ValueError as exc:
+    except (PendingMigrationsError, ValueError) as exc:
         print(str(exc), file=sys.stderr)
         raise SystemExit(1) from None
 

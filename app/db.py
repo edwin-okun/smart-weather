@@ -1,4 +1,3 @@
-import logging
 
 from tortoise import Tortoise
 from tortoise.connection import get_connection
@@ -8,8 +7,6 @@ from tortoise.migrations.executor import MigrationExecutor
 
 from app.config import settings
 
-
-logger = logging.getLogger(__name__)
 
 # Also the config for Tortoise's migration CLI:
 #   uv run python -m tortoise -c app.db.TORTOISE_ORM <command>
@@ -25,6 +22,17 @@ TORTOISE_ORM = {
 }
 
 _db_context: TortoiseContext | None = None
+
+
+class PendingMigrationsError(RuntimeError):
+    """The database schema is behind the migrations, so the app cannot serve."""
+
+    def __init__(self, pending: list[str]) -> None:
+        self.pending = pending
+        super().__init__(
+            f"Database has unapplied migrations ({', '.join(pending)}); "
+            "run `uv run smart-weather migrate` before starting the app."
+        )
 
 
 async def run_migrations() -> None:
@@ -58,12 +66,12 @@ async def init_db() -> None:
         # throwaway databases (tests). Real databases are managed by migrations.
         await _db_context.generate_schemas()
     else:
+        # Refuse to start rather than serve requests that fail against missing
+        # tables or columns while /health still reports OK.
         pending = await _pending_migrations()
         if pending:
-            logger.warning(
-                "Database has unapplied migrations (%s); run `uv run smart-weather migrate`.",
-                ", ".join(pending),
-            )
+            await close_db()
+            raise PendingMigrationsError(pending)
 
 
 async def close_db() -> None:

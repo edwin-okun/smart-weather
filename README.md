@@ -421,8 +421,10 @@ uv run smart-weather migrate            # everything pending
 uv run smart-weather migrate --dry-run  # show the plan only
 ```
 
-Run this as a deploy step before starting the new version. The app logs a
-warning at startup if migrations are pending. `RUN_DB_MIGRATIONS_ON_STARTUP=true`
+Run this as a deploy step before starting the new version. If migrations are
+pending, the app refuses to start (and the admin commands exit with an error)
+instead of serving requests that would fail against missing tables or columns.
+`RUN_DB_MIGRATIONS_ON_STARTUP=true`
 makes the app apply them itself, which is convenient for a single local
 process. Leave it off when several workers or replicas share a database,
 because they would race to run the same DDL.
