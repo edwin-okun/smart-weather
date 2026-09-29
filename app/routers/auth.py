@@ -100,7 +100,9 @@ async def oauth_authorization_server_metadata(request: Request):
             "client_secret_post",
             "none",
         ],
-        "scopes_supported": ["weather:read", "weather:history:read"],
+        # Advertise only what a client discovering this server can obtain via
+        # /register; admin-only scopes (e.g. ai:ask) are deliberately omitted.
+        "scopes_supported": list(settings.dynamic_registration_allowed_scopes),
     }
 
 

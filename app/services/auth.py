@@ -5,7 +5,7 @@ from urllib.parse import urlsplit
 from fastapi import HTTPException, status
 
 from app.config import settings
-from app.permissions import ALL_SCOPES, WEATHER_READ
+from app.permissions import WEATHER_READ
 from app.repositories.auth import (
     add_redirect_uri_to_client,
     consume_authorization_code,
@@ -143,7 +143,9 @@ async def register_dynamic_api_client(
             if registration.scope and registration.scope.strip()
             else WEATHER_READ
         )
-        scopes = _select_scopes(requested_scope, sorted(ALL_SCOPES))
+        scopes = _select_scopes(
+            requested_scope, settings.dynamic_registration_allowed_scopes
+        )
     except HTTPException as exc:
         raise DynamicClientRegistrationError(
             "invalid_client_metadata",

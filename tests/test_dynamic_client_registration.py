@@ -8,11 +8,21 @@ from urllib.parse import parse_qs, urlsplit
 from fastapi.testclient import TestClient
 
 from app import db
+from app.config import Settings, settings
 from app.main import app, mcp
 from app.models.auth import ApiClient, RefreshToken
+from app.permissions import AI_ASK
 from app.repositories.auth import create_public_api_client_with_redirect_uris
 from app.services.auth import register_api_client
 from app.security import utc_now
+
+
+_PKCE_VERIFIER = "registration-scope-policy-verifier-0123456789abcdef"
+_PKCE_CHALLENGE = (
+    base64.urlsafe_b64encode(hashlib.sha256(_PKCE_VERIFIER.encode()).digest())
+    .rstrip(b"=")
+    .decode("ascii")
+)
 
 
 async def _client_count() -> int:
@@ -370,6 +380,132 @@ class DynamicClientRegistrationTests(unittest.TestCase):
             mismatched_redirect.json()["detail"],
             "invalid_redirect_uri",
         )
+
+    def _authorize(self, client_id: str, scope: str | None):
+        params = {
+            "client_id": client_id,
+            "response_type": "code",
+            "redirect_uri": "https://client.example/callback",
+            "code_challenge": _PKCE_CHALLENGE,
+            "code_challenge_method": "S256",
+        }
+        if scope is not None:
+            params["scope"] = scope
+        return self.client.get("/authorize", params=params, follow_redirects=False)
+
+    def test_registration_cannot_self_grant_admin_only_scopes(self) -> None:
+        for scope in [
+            "ai:ask",
+            "weather:read ai:ask",
+            "weather:history:read",
+            "weather:read weather:history:read ai:ask",
+        ]:
+            for auth_method in ["none", "client_secret_basic"]:
+                with self.subTest(scope=scope, auth_method=auth_method):
+                    response = self.client.post(
+                        "/register",
+                        json={
+                            "redirect_uris": ["https://client.example/callback"],
+                            "token_endpoint_auth_method": auth_method,
+                            "scope": scope,
+                        },
+                    )
+                    self.assertEqual(response.status_code, 400)
+                    self.assertEqual(
+                        response.json()["error"], "invalid_client_metadata"
+                    )
+
+        self.assertEqual(self.client.portal.call(_client_count), 0)
+
+    def test_registration_with_default_allowed_scope_succeeds(self) -> None:
+        for payload in [{}, {"scope": "weather:read"}]:
+            with self.subTest(payload=payload):
+                response = self.client.post(
+                    "/register",
+                    json={
+                        "redirect_uris": ["https://client.example/callback"],
+                        **payload,
+                    },
+                )
+                self.assertEqual(response.status_code, 201)
+                self.assertEqual(response.json()["scope"], "weather:read")
+
+        metadata = self.client.get("/.well-known/oauth-authorization-server")
+        self.assertEqual(metadata.json()["scopes_supported"], ["weather:read"])
+
+    def test_registration_allowlist_is_configurable(self) -> None:
+        with patch.object(
+            settings,
+            "dynamic_registration_allowed_scopes",
+            ["weather:history:read", "weather:read"],
+        ):
+            response = self.client.post(
+                "/register",
+                json={
+                    "redirect_uris": ["https://client.example/callback"],
+                    "scope": "weather:read weather:history:read",
+                },
+            )
+            metadata = self.client.get("/.well-known/oauth-authorization-server")
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json()["scope"], "weather:history:read weather:read")
+        self.assertEqual(
+            metadata.json()["scopes_supported"],
+            ["weather:history:read", "weather:read"],
+        )
+        with self.assertRaises(ValueError):
+            Settings(dynamic_registration_allowed_scopes=["weather:write"])
+        self.assertNotIn(AI_ASK, Settings().dynamic_registration_allowed_scopes)
+
+    def test_dynamic_client_cannot_obtain_ai_ask_via_authorize(self) -> None:
+        registration = self.client.post(
+            "/register",
+            json={"redirect_uris": ["https://client.example/callback"]},
+        ).json()
+
+        for scope in ["ai:ask", "weather:read ai:ask"]:
+            with self.subTest(scope=scope):
+                response = self._authorize(registration["client_id"], scope)
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(response.json()["detail"], "invalid_scope")
+
+        # Omitting scope falls back to the client's registered scopes only.
+        response = self._authorize(registration["client_id"], None)
+        self.assertEqual(response.status_code, 302)
+        code = parse_qs(urlsplit(response.headers["location"]).query)["code"][0]
+        token = self.client.post(
+            "/oauth/token",
+            data={
+                "grant_type": "authorization_code",
+                "client_id": registration["client_id"],
+                "code": code,
+                "redirect_uri": "https://client.example/callback",
+                "code_verifier": _PKCE_VERIFIER,
+            },
+        )
+        self.assertEqual(token.status_code, 200)
+        self.assertEqual(token.json()["scope"], "weather:read")
+
+    def test_admin_created_client_can_still_hold_ai_ask(self) -> None:
+        created = self.client.portal.call(
+            register_api_client,
+            "Trusted AI client",
+            ["weather:read", "ai:ask"],
+        )
+        self.assertEqual(created.scopes, ["ai:ask", "weather:read"])
+
+        token = self.client.post(
+            "/oauth/token",
+            data={
+                "grant_type": "client_credentials",
+                "client_id": created.client_id,
+                "client_secret": created.client_secret,
+                "scope": "ai:ask",
+            },
+        )
+        self.assertEqual(token.status_code, 200)
+        self.assertEqual(token.json()["scope"], "ai:ask")
 
     def test_existing_confidential_client_creation_still_returns_secret(self) -> None:
         created = self.client.portal.call(
