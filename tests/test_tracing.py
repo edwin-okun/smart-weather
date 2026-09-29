@@ -48,3 +48,12 @@ class ConfigureTracingTests(unittest.TestCase):
             self.assertEqual(
                 os.environ["LANGSMITH_ENDPOINT"], "https://eu.api.smith.langchain.com"
             )
+
+
+class FlushTracesTests(unittest.TestCase):
+    def test_flush_is_bounded(self) -> None:
+        with patch.object(tracing, "get_client") as get_client:
+            tracing.flush_traces()
+        get_client.return_value.flush.assert_called_once_with(
+            timeout=tracing.FLUSH_TIMEOUT_SECONDS
+        )

@@ -1,16 +1,22 @@
 import asyncio
 import unittest
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from email.utils import format_datetime
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
+import httpx
+import openai
 from fastapi import HTTPException
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
 from pydantic import Field, ValidationError
 
 from app.ai.tools import build_tools, get_current_weather, list_weather_history
+from app.config import Settings
 from app.exceptions import (
+    AIRateLimitError,
     AIStepLimitError,
     AITimeoutError,
     AIUpstreamError,
@@ -51,6 +57,32 @@ class ToolCallingFakeModel(GenericFakeChatModel):
 class FailingModel(ToolCallingFakeModel):
     def _generate(self, messages, *args, **kwargs):
         raise RuntimeError("provider exploded: sk-secret")
+
+
+def _openai_error(status: int, headers: dict[str, str] | None = None, body: dict | None = None):
+    request = httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
+    response = httpx.Response(status, headers=headers or {}, request=request)
+    cls = openai.RateLimitError if status == 429 else openai.APIStatusError
+    return cls("provider said no", response=response, body=body)
+
+
+class RaisingModel(ToolCallingFakeModel):
+    """Raises the given error from an OpenAI-style provider, wrapped like LangChain does."""
+
+    error: Any = None
+
+    async def _agenerate(self, messages, *args, **kwargs):
+        raise RuntimeError("model call failed") from self.error
+
+
+class GateModel(ToolCallingFakeModel):
+    """Blocks inside the model call until `gate` is set, to hold a run in flight."""
+
+    gate: Any = None
+
+    async def _agenerate(self, messages, *args, **kwargs):
+        await self.gate.wait()
+        return ChatResult(generations=[ChatGeneration(message=AIMessage(content="ok"))])
 
 
 class SlowModel(ToolCallingFakeModel):
@@ -135,7 +167,9 @@ class AskWeatherAssistantTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         # The compiled agent is cached with whatever model was current; tests swap models.
         ai_service._get_agent.cache_clear()
+        ai_service._run_slots.cache_clear()
         self.addCleanup(ai_service._get_agent.cache_clear)
+        self.addCleanup(ai_service._run_slots.cache_clear)
 
     async def _ask(self, model, *scopes: str, question: str = "How is Nairobi?"):
         with patch.object(ai_service, "get_chat_model", return_value=model):
@@ -235,6 +269,19 @@ class AskWeatherAssistantTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertNotIn("sk-secret", str(ctx.exception))
 
+    async def test_model_setup_failure_raises_generic_error(self) -> None:
+        # e.g. no API key configured: the provider SDK raises while building the model.
+        with (
+            patch.object(
+                ai_service, "get_chat_model", side_effect=openai.OpenAIError("api_key must be set")
+            ),
+            self.assertLogs(ai_service.logger, "ERROR"),
+            self.assertRaises(AIUpstreamError),
+        ):
+            await ai_service.ask_weather_assistant("How is Nairobi?", _client(WEATHER_READ))
+
+        self.assertFalse(ai_service._run_slots().locked())
+
     async def test_run_timeout_raises(self) -> None:
         with (
             patch.object(ai_service.settings, "ai_request_timeout", 0.05),
@@ -247,12 +294,110 @@ class AskWeatherAssistantTests(unittest.IsolatedAsyncioTestCase):
         with self.assertLogs(ai_service.logger, "WARNING"), self.assertRaises(AIUpstreamError):
             await self._ask(_model(AIMessage(content="  ")), WEATHER_READ)
 
+    async def test_provider_rate_limit_becomes_retryable_error(self) -> None:
+        error = _openai_error(429, headers={"retry-after": "2.5"})
+        model = _model(cls=RaisingModel).model_copy(update={"error": error})
+
+        with self.assertLogs(ai_service.logger, "WARNING") as logs, self.assertRaises(AIRateLimitError) as ctx:
+            await self._ask(model, WEATHER_READ)
+
+        self.assertEqual(ctx.exception.retry_after, 3)
+        self.assertNotIn("Traceback", "\n".join(logs.output))
+
+    async def test_rate_limit_without_header_defaults_to_one_second(self) -> None:
+        model = _model(cls=RaisingModel).model_copy(update={"error": _openai_error(429)})
+
+        with self.assertLogs(ai_service.logger, "WARNING"), self.assertRaises(AIRateLimitError) as ctx:
+            await self._ask(model, WEATHER_READ)
+
+        self.assertEqual(ctx.exception.retry_after, 1)
+
+    async def test_insufficient_quota_is_not_reported_as_retryable(self) -> None:
+        error = _openai_error(429, body={"code": "insufficient_quota", "message": "billing"})
+        model = _model(cls=RaisingModel).model_copy(update={"error": error})
+
+        with self.assertLogs(ai_service.logger, "ERROR"), self.assertRaises(AIUpstreamError):
+            await self._ask(model, WEATHER_READ)
+
+    async def test_other_provider_status_errors_stay_generic(self) -> None:
+        model = _model(cls=RaisingModel).model_copy(update={"error": _openai_error(500)})
+
+        with self.assertLogs(ai_service.logger, "ERROR"), self.assertRaises(AIUpstreamError):
+            await self._ask(model, WEATHER_READ)
+
+    async def test_concurrency_cap_rejects_excess_runs_and_releases_slots(self) -> None:
+        gate = asyncio.Event()
+        held = _model(cls=GateModel).model_copy(update={"gate": gate})
+
+        with patch.object(ai_service.settings, "ai_max_concurrency", 1):
+            first = asyncio.create_task(self._ask(held, WEATHER_READ))
+            # One loop turn runs the task up to the model call, past taking the only slot.
+            await asyncio.sleep(0)
+            self.assertTrue(ai_service._run_slots().locked())
+
+            with (
+                self.assertLogs(ai_service.logger, "WARNING"),
+                self.assertRaises(AIRateLimitError) as ctx,
+            ):
+                await self._ask(_model(), WEATHER_READ)
+            self.assertEqual(ctx.exception.retry_after, 1)
+
+            gate.set()
+            self.assertEqual((await first).answer, "ok")
+            # The slot is free again once the run finishes.
+            self.assertEqual((await self._ask(held, WEATHER_READ)).answer, "ok")
+
+    async def test_slot_is_released_when_a_run_fails(self) -> None:
+        with patch.object(ai_service.settings, "ai_max_concurrency", 1):
+            with self.assertLogs(ai_service.logger, "ERROR"), self.assertRaises(AIUpstreamError):
+                await self._ask(_model(cls=FailingModel), WEATHER_READ)
+
+            self.assertFalse(ai_service._run_slots().locked())
+
+    def test_concurrency_cap_must_be_positive(self) -> None:
+        # 0 would reject every request and a negative value breaks asyncio.Semaphore.
+        for value in (0, -1):
+            with self.subTest(value=value), self.assertRaises(ValidationError):
+                Settings(_env_file=None, ai_max_concurrency=value)
+
     async def test_agent_is_cached_per_tool_scope_set(self) -> None:
         with patch.object(ai_service, "get_chat_model", return_value=_model()) as get_model:
             read_only = ai_service._get_agent(frozenset({WEATHER_READ}))
             self.assertIs(read_only, ai_service._get_agent(frozenset({WEATHER_READ})))
             self.assertIsNot(read_only, ai_service._get_agent(frozenset()))
         self.assertEqual(get_model.call_count, 2)
+
+
+class ProviderRateLimitTests(unittest.TestCase):
+    @staticmethod
+    def _retry_after(headers: dict[str, str]) -> int:
+        return ai_service._provider_rate_limit(_openai_error(429, headers=headers)).retry_after
+
+    def test_retry_after_forms(self) -> None:
+        cases = {
+            "seconds": ({"retry-after": "7"}, 7),
+            "fractional seconds round up": ({"retry-after": "2.5"}, 3),
+            "milliseconds win": ({"retry-after-ms": "1500", "retry-after": "9"}, 2),
+            "past date": ({"retry-after": "Wed, 21 Oct 2015 07:28:00 GMT"}, 1),
+            "clamped high": ({"retry-after": "3600"}, 60),
+            "infinite": ({"retry-after": "inf"}, 60),
+            "nan": ({"retry-after": "nan"}, 1),
+            "garbage": ({"retry-after": "soon"}, 1),
+            "missing": ({}, 1),
+        }
+        for name, (headers, expected) in cases.items():
+            with self.subTest(name):
+                self.assertEqual(self._retry_after(headers), expected)
+
+    def test_retry_after_http_date(self) -> None:
+        soon = format_datetime(datetime.now(UTC) + timedelta(seconds=30), usegmt=True)
+        # The date has whole-second precision, so allow for a second boundary.
+        self.assertIn(self._retry_after({"retry-after": soon}), {29, 30})
+
+    def test_cyclic_cause_chain_terminates(self) -> None:
+        first, second = RuntimeError("a"), RuntimeError("b")
+        first.__cause__, second.__cause__ = second, first
+        self.assertIsNone(ai_service._provider_rate_limit(first))
 
 
 class AskRouteTests(unittest.IsolatedAsyncioTestCase):
@@ -268,6 +413,20 @@ class AskRouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self._status_for(AIUpstreamError("AI agent run failed")), 502)
         self.assertEqual(await self._status_for(AIStepLimitError("step limit")), 502)
         self.assertEqual(await self._status_for(AITimeoutError("timed out")), 504)
+
+    async def test_rate_limit_maps_to_429_with_retry_after(self) -> None:
+        with (
+            patch.object(
+                ai_router,
+                "ask_weather_assistant",
+                AsyncMock(side_effect=AIRateLimitError("busy", retry_after=7)),
+            ),
+            self.assertRaises(HTTPException) as ctx,
+        ):
+            await ai_router.ask(AskRequest(question="hi"), _client(AI_ASK))
+
+        self.assertEqual(ctx.exception.status_code, 429)
+        self.assertEqual(ctx.exception.headers, {"Retry-After": "7"})
 
     def test_blank_question_is_rejected(self) -> None:
         with self.assertRaises(ValidationError):

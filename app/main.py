@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -17,12 +18,13 @@ logging.basicConfig(level=logging.INFO)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    configure_tracing()
+    tracing = configure_tracing()
     await init_db()
     try:
         yield
     finally:
-        flush_traces()
+        if tracing:
+            await asyncio.to_thread(flush_traces)
         await weather_client.aclose()
         await close_db()
 
