@@ -45,14 +45,21 @@ class CaseBackend:
                 return WeatherResponse(location=_location(fixture), weather=fill_dates(fixture.forecast, self.today))
         raise LocationNotFoundError(f"No location found for city {city}")
 
-    async def get_weather_history(self, limit: int = 20, city: str | None = None) -> list[WeatherHistoryItem]:
-        self.calls.append({"function": "get_weather_history", "limit": limit, "city": city})
+    async def get_weather_history(
+        self, limit: int = 20, city: str | None = None, country_code: str | None = None
+    ) -> list[WeatherHistoryItem]:
+        self.calls.append({"function": "get_weather_history", "limit": limit, "city": city, "country_code": country_code})
         if self.history is None:
             return []
         if self.history.error is not None:
             raise _exception(self.history.error)
         items = []
-        entries = [e for e in self.history.entries if city is None or e.city.lower() == city.lower()]
+        entries = [
+            e
+            for e in self.history.entries
+            if (city is None or e.city.lower() == city.lower())
+            and (country_code is None or e.country_code.upper() == country_code.upper())
+        ]
         for index, entry in enumerate(entries[:limit]):
             fixture = self._all_locations[entry.location]
             weather = copy.deepcopy(fixture.forecast or {})
@@ -105,8 +112,10 @@ async def _fake_get_weather_for_city(city: str, country_code: str = "KE") -> Wea
     return await _backend().get_weather_for_city(city=city, country_code=country_code)
 
 
-async def _fake_get_weather_history(limit: int = 20, city: str | None = None) -> list[WeatherHistoryItem]:
-    return await _backend().get_weather_history(limit=limit, city=city)
+async def _fake_get_weather_history(
+    limit: int = 20, city: str | None = None, country_code: str | None = None
+) -> list[WeatherHistoryItem]:
+    return await _backend().get_weather_history(limit=limit, city=city, country_code=country_code)
 
 
 @contextmanager

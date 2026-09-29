@@ -14,8 +14,8 @@ class WeatherHistoryFilterTests(unittest.IsolatedAsyncioTestCase):
         db.TORTOISE_ORM["connections"]["default"] = "sqlite://:memory:"
         await db.init_db()
         self.addAsyncCleanup(db.close_db)
-        for city in ("Nairobi", "Tokyo", "Nairobi", "London"):
-            await create_weather_lookup(city, "KE", _location(city), {"current": {}})
+        for city, country_code in (("Nairobi", "KE"), ("Tokyo", "JP"), ("Nairobi", "KE"), ("London", "GB")):
+            await create_weather_lookup(city, country_code, _location(city), {"current": {}})
 
     async def test_lists_newest_first_without_a_filter(self) -> None:
         lookups = await list_weather_lookups(limit=3)
@@ -25,6 +25,16 @@ class WeatherHistoryFilterTests(unittest.IsolatedAsyncioTestCase):
         lookups = await list_weather_lookups(limit=1, city="nAIROBI")
         self.assertEqual([lookup.city for lookup in lookups], ["Nairobi"])
         self.assertEqual(len(await list_weather_lookups(limit=10, city="NAIROBI")), 2)
+
+    async def test_country_filter_separates_duplicate_city_names(self) -> None:
+        # Paris, Texas is looked up after Paris, France.
+        await create_weather_lookup("Paris", "FR", _location("Paris"), {"current": {"temperature_2m": 12.5}})
+        await create_weather_lookup("Paris", "US", _location("Paris"), {"current": {"temperature_2m": 31.0}})
+
+        [newest] = await list_weather_lookups(limit=1, city="paris")
+        self.assertEqual(newest.country_code, "US")
+        [france] = await list_weather_lookups(limit=1, city="paris", country_code="fr")
+        self.assertEqual((france.country_code, france.weather["current"]["temperature_2m"]), ("FR", 12.5))
 
     async def test_unknown_city_returns_nothing(self) -> None:
         self.assertEqual(await list_weather_lookups(city="Atlantis"), [])

@@ -1233,6 +1233,30 @@
       "canaries": [
         "database is locked"
       ]
+    },
+    "paris_both": {
+      "entries": [
+        {
+          "location": "paris_tx",
+          "city": "Paris",
+          "country_code": "US",
+          "looked_up_at": "{today}T15:20:00+00:00",
+          "current": {
+            "time": "{today}T10:15",
+            "temperature_2m": 31.0
+          }
+        },
+        {
+          "location": "paris_fr",
+          "city": "Paris",
+          "country_code": "FR",
+          "looked_up_at": "{today}T08:05:00+00:00",
+          "current": {
+            "time": "{today}T10:00",
+            "temperature_2m": 12.5
+          }
+        }
+      ]
     }
   }
 }

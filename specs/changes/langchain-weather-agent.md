@@ -70,7 +70,7 @@ Tools call the existing weather service layer directly, not HTTP or MCP.
 | Tool | Wraps | Required scope |
 | --- | --- | --- |
 | `get_current_weather(city, country_code="KE")` | `get_weather_for_city` | `weather:read` |
-| `list_weather_history(limit=5, city=None)` | `get_weather_history` | `weather:history:read` |
+| `list_weather_history(limit=5, city=None, country_code=None)` | `get_weather_history` | `weather:history:read` |
 
 Tools are selected per request from the caller's scopes, using the same scope
 each equivalent HTTP endpoint requires. The agent therefore cannot read data
@@ -79,10 +79,12 @@ with no tools.
 
 Tool arguments are validated before any upstream call: `city` is 1 to 100
 characters, `country_code` is two letters, and history `limit` is 1 to 20. The
-history tool also takes an optional `city`, matched case-insensitively and
-applied before the limit, so the model can find one city's earlier lookups
-without guessing a large enough limit. History is newest first across all
-cities. The HTTP history endpoint is unchanged.
+history tool also takes an optional `city`, matched case-insensitively, and an
+optional two-letter `country_code`. Both are applied before the limit, so the
+model can find one city's earlier lookups without guessing a large enough
+limit, and can tell apart cities that share a name (Paris, France and Paris,
+Texas). History is newest first across all cities. The HTTP history endpoint is
+unchanged.
 Invalid arguments are returned to the model so it can correct them.
 
 Tool results are trimmed before they reach the model: a place name, observation
