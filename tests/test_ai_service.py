@@ -1,6 +1,7 @@
 import asyncio
 import unittest
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from email.utils import format_datetime
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -352,6 +353,38 @@ class AskWeatherAssistantTests(unittest.IsolatedAsyncioTestCase):
             self.assertIs(read_only, ai_service._get_agent(frozenset({WEATHER_READ})))
             self.assertIsNot(read_only, ai_service._get_agent(frozenset()))
         self.assertEqual(get_model.call_count, 2)
+
+
+class ProviderRateLimitTests(unittest.TestCase):
+    @staticmethod
+    def _retry_after(headers: dict[str, str]) -> int:
+        return ai_service._provider_rate_limit(_openai_error(429, headers=headers)).retry_after
+
+    def test_retry_after_forms(self) -> None:
+        cases = {
+            "seconds": ({"retry-after": "7"}, 7),
+            "fractional seconds round up": ({"retry-after": "2.5"}, 3),
+            "milliseconds win": ({"retry-after-ms": "1500", "retry-after": "9"}, 2),
+            "past date": ({"retry-after": "Wed, 21 Oct 2015 07:28:00 GMT"}, 1),
+            "clamped high": ({"retry-after": "3600"}, 60),
+            "infinite": ({"retry-after": "inf"}, 60),
+            "nan": ({"retry-after": "nan"}, 1),
+            "garbage": ({"retry-after": "soon"}, 1),
+            "missing": ({}, 1),
+        }
+        for name, (headers, expected) in cases.items():
+            with self.subTest(name):
+                self.assertEqual(self._retry_after(headers), expected)
+
+    def test_retry_after_http_date(self) -> None:
+        soon = format_datetime(datetime.now(UTC) + timedelta(seconds=30), usegmt=True)
+        # The date has whole-second precision, so allow for a second boundary.
+        self.assertIn(self._retry_after({"retry-after": soon}), {29, 30})
+
+    def test_cyclic_cause_chain_terminates(self) -> None:
+        first, second = RuntimeError("a"), RuntimeError("b")
+        first.__cause__, second.__cause__ = second, first
+        self.assertIsNone(ai_service._provider_rate_limit(first))
 
 
 class AskRouteTests(unittest.IsolatedAsyncioTestCase):

@@ -2,7 +2,8 @@ import asyncio
 import logging
 import math
 import time
-from datetime import date
+from datetime import UTC, date, datetime
+from email.utils import parsedate_to_datetime
 from functools import lru_cache
 
 from langchain.agents import create_agent
@@ -52,10 +53,10 @@ def _run_slots() -> asyncio.Semaphore:
 def _provider_rate_limit(exc: BaseException) -> AIRateLimitError | None:
     """Recognise a transient provider 429 without importing any provider SDK.
 
-    Provider SDKs (OpenAI, Anthropic, Google, ...) expose `status_code` on their
-    HTTP errors, and LangChain re-raises them wrapped, so walk the cause chain.
-    A 429 with code `insufficient_quota` is a billing problem, not a transient
-    limit, so it is left to the generic upstream-error path.
+    httpx-based provider SDKs (OpenAI, Anthropic, ...) expose `status_code` on
+    their HTTP errors, and LangChain may re-raise them wrapped, so walk the cause
+    chain. A 429 with code `insufficient_quota` is a billing problem, not a
+    transient limit, so it is left to the generic upstream-error path.
     """
     seen = 0
     while exc is not None and seen < 5:
@@ -63,16 +64,36 @@ def _provider_rate_limit(exc: BaseException) -> AIRateLimitError | None:
             if getattr(exc, "code", None) == "insufficient_quota":
                 return None
             headers = getattr(getattr(exc, "response", None), "headers", None) or {}
-            try:
-                retry_after = int(math.ceil(float(headers.get("retry-after", 1))))
-            except (TypeError, ValueError):
-                retry_after = 1
             return AIRateLimitError(
-                "AI provider is rate limited, retry later", retry_after=min(max(retry_after, 1), 60)
+                "AI provider is rate limited, retry later", retry_after=_retry_after_seconds(headers)
             )
         exc = exc.__cause__ or exc.__context__
         seen += 1
     return None
+
+
+def _retry_after_seconds(headers) -> int:
+    """Whole seconds to wait, clamped to 1-60, from the provider's 429 headers.
+
+    Prefers OpenAI's `retry-after-ms`, then `Retry-After` as seconds or an
+    HTTP-date; anything missing or unparseable means 1 second.
+    """
+    try:
+        if (millis := headers.get("retry-after-ms")) is not None:
+            seconds = float(millis) / 1000
+        elif (value := headers.get("retry-after")) is not None:
+            try:
+                seconds = float(value)
+            except ValueError:
+                seconds = (parsedate_to_datetime(value) - datetime.now(UTC)).total_seconds()
+        else:
+            seconds = 1.0
+    except (TypeError, ValueError):  # bad values, or a date without a timezone
+        seconds = 1.0
+    if math.isnan(seconds):
+        seconds = 1.0
+    # Clamp before ceil: ceil(inf) raises OverflowError.
+    return math.ceil(min(max(seconds, 1.0), 60.0))
 
 
 @lru_cache
