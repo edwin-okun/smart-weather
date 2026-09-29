@@ -317,7 +317,7 @@ Settings are read from environment variables or `.env`. Copy `.env.example` to `
 | `AI_TEMPERATURE` | `0.0` | Model sampling temperature |
 | `AI_MAX_OUTPUT_TOKENS` | `1024` | Output token cap per model call |
 | `AI_TIMEOUT` | `30.0` | Per model call timeout in seconds |
-| `AI_MAX_RETRIES` | `2` | Per model call retries |
+| `AI_MAX_RETRIES` | `1` | Per model call retries; SDK retries count against provider rate limits |
 | `AI_REQUEST_TIMEOUT` | `60.0` | Timeout for the whole `/ai/ask` run in seconds |
 | `AI_MAX_STEPS` | `8` | Agent recursion limit (each model call and tool round is one step) |
 | `AI_MAX_CONCURRENCY` | `10` | Max concurrent `/ai/ask` runs per process; excess requests get `429` |
