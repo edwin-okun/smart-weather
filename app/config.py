@@ -1,3 +1,4 @@
+from pydantic import PositiveInt
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -28,7 +29,7 @@ class Settings(BaseSettings):
     # Max /ai/ask runs in flight per process. Each run makes several model calls
     # (and retries count against provider rate limits), so this bounds quota use.
     # Excess requests are rejected with 429 rather than queued.
-    ai_max_concurrency: int = 10
+    ai_max_concurrency: PositiveInt = 10
 
     # LangSmith tracing (off by default). LangChain reads these only from the
     # process environment, so app.ai.tracing exports them at startup; that lets
