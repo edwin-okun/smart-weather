@@ -364,6 +364,13 @@ experiments, point `DATABASE_URL` at another SQLite path:
 DATABASE_URL=sqlite:///tmp/smart_weather_dev.sqlite3 uv run fastapi dev
 ```
 
+Evaluate the `/ai/ask` agent's answer quality (real model calls, which cost
+money; weather data comes from fixtures). See [evals/README.md](evals/README.md):
+
+```bash
+uv run python -m evals.run --cases 'cw-*' --no-judge
+```
+
 Run the CLI help:
 
 ```bash
