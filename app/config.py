@@ -9,7 +9,14 @@ class Settings(BaseSettings):
 
     app_name: str = "smart-weather"
     database_url: str = "sqlite://smart_weather.sqlite3"
-    generate_db_schemas: bool = True
+    # Schema management. Migrations (app/migrations) are the source of truth;
+    # apply them with `smart-weather migrate` as a deploy step. Set
+    # run_db_migrations_on_startup to have each app process apply them itself
+    # (fine for a single process; racy with several workers or replicas).
+    # generate_db_schemas only creates missing tables and never alters existing
+    # ones, so keep it for throwaway databases such as tests.
+    run_db_migrations_on_startup: bool = False
+    generate_db_schemas: bool = False
     weather_client_timeout: float = 10.0
     access_token_ttl_seconds: int = 900
     authorization_code_ttl_seconds: int = 300
