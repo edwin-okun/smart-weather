@@ -14,12 +14,18 @@ class Settings(BaseSettings):
     public_base_url: str | None = None
 
     # AI: LangChain "provider:model" string; api key falls back to openai_api_key
-    # for openai models.
+    # for openai models. ai_timeout/ai_max_retries apply per model call, while
+    # ai_request_timeout bounds the whole /ai/ask run. ai_max_steps is the agent
+    # graph recursion limit (each model call and each tool round is one step).
+    # Tracing is off unless LANGSMITH_TRACING/LANGSMITH_API_KEY are exported in
+    # the process environment (LangChain reads them directly, not via Settings).
     ai_model: str = "openai:gpt-4o-mini"
     ai_api_key: str | None = None
     ai_temperature: float = 0.0
-    ai_timeout: float = 60.0
-    ai_max_retries: int = 3
+    ai_max_output_tokens: int = 1024
+    ai_timeout: float = 30.0
+    ai_max_retries: int = 2
+    ai_request_timeout: float = 60.0
     ai_max_steps: int = 8
 
     # api keys

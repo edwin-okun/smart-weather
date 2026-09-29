@@ -16,6 +16,7 @@ def get_chat_model() -> BaseChatModel:
     """
     kwargs: dict = {
         "temperature": settings.ai_temperature,
+        "max_tokens": settings.ai_max_output_tokens,
         "timeout": settings.ai_timeout,
         "max_retries": settings.ai_max_retries,
     }

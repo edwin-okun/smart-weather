@@ -16,3 +16,11 @@ class AIServiceError(Exception):
 
 class AIUpstreamError(AIServiceError):
     pass
+
+
+class AITimeoutError(AIServiceError):
+    pass
+
+
+class AIStepLimitError(AIServiceError):
+    pass

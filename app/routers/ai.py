@@ -3,7 +3,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException
 
 from app.dependencies import require_scopes
-from app.exceptions import AIServiceError
+from app.exceptions import AIServiceError, AITimeoutError
 from app.permissions import AI_ASK
 from app.schemas.ai import AskRequest, AskResponse
 from app.schemas.auth import AuthenticatedClient
@@ -28,5 +28,7 @@ async def ask(
 ):
     try:
         return await ask_weather_assistant(body.question, client)
+    except AITimeoutError as exc:
+        raise HTTPException(status_code=504, detail=str(exc)) from exc
     except AIServiceError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
