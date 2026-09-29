@@ -6,6 +6,7 @@ from fastapi_mcp import FastApiMCP
 from fastapi_mcp.types import AuthConfig
 
 from app.clients import weather_client
+from app.ai.tracing import configure_tracing, flush_traces
 from app.config import settings
 from app.db import close_db, init_db
 from app.dependencies import get_current_client
@@ -16,10 +17,12 @@ logging.basicConfig(level=logging.INFO)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    configure_tracing()
     await init_db()
     try:
         yield
     finally:
+        flush_traces()
         await weather_client.aclose()
         await close_db()
 
