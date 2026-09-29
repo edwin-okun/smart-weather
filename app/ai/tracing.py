@@ -1,11 +1,13 @@
 import logging
 import os
 
-from langchain_core.tracers.langchain import wait_for_all_tracers
+from langchain_core.tracers.langchain import get_client
 
 from app.config import settings
 
 logger = logging.getLogger(__name__)
+
+FLUSH_TIMEOUT_SECONDS = 10.0
 
 
 def configure_tracing() -> bool:
@@ -35,6 +37,10 @@ def configure_tracing() -> bool:
     return True
 
 
-def flush_traces() -> None:
-    """Block until queued traces are sent; call on shutdown so none are lost."""
-    wait_for_all_tracers()
+def flush_traces(timeout: float = FLUSH_TIMEOUT_SECONDS) -> None:
+    """Wait up to `timeout` seconds for queued traces to send; call on shutdown.
+
+    Bounded so an unreachable LangSmith cannot hang shutdown. This blocks, so
+    call it from a worker thread when on the event loop.
+    """
+    get_client().flush(timeout=timeout)
