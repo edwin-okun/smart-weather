@@ -7,7 +7,9 @@ given scopes, then scores the tool calls and the answer.
 The weather tools never reach Open-Meteo or the database:
 `app.ai.tools.get_weather_for_city` and `get_weather_history` are patched with
 fakes that serve the case's fixtures (realistic Open-Meteo geocoding and
-forecast payloads). Model calls are real.
+forecast payloads). Like the real service, the fake saves every successful
+current-weather lookup to history, so a history call made after one sees the
+new reading first. Model calls are real.
 
 Evals are not part of `unittest discover`: they need an API key and cost
 money. The runner's own logic is unit tested offline in `tests/test_evals.py`.

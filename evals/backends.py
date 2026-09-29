@@ -11,7 +11,7 @@ import copy
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
-from datetime import date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 from unittest.mock import patch
 
@@ -32,6 +32,9 @@ class CaseBackend:
         self._all_locations = dataset.fixtures.locations
         # What the tools asked the service for, for the report and tests.
         self.calls: list[dict[str, Any]] = []
+        # Lookups made during this run, newest first. The real service saves every
+        # successful current-weather lookup, so later history calls must see them.
+        self.saved: list[WeatherHistoryItem] = []
 
     async def get_weather_for_city(self, city: str, country_code: str = "KE") -> WeatherResponse:
         self.calls.append({"function": "get_weather_for_city", "city": city, "country_code": country_code})
@@ -42,25 +45,31 @@ class CaseBackend:
             if query in names and fixture.geocoding["country_code"].upper() == country_code.upper():
                 if fixture.error is not None:
                     raise _exception(fixture.error)
-                return WeatherResponse(location=_location(fixture), weather=fill_dates(fixture.forecast, self.today))
+                response = WeatherResponse(location=_location(fixture), weather=fill_dates(fixture.forecast, self.today))
+                self._save(city, country_code, response)
+                return response
         raise LocationNotFoundError(f"No location found for city {city}")
 
     async def get_weather_history(
         self, limit: int = 20, city: str | None = None, country_code: str | None = None
     ) -> list[WeatherHistoryItem]:
         self.calls.append({"function": "get_weather_history", "limit": limit, "city": city, "country_code": country_code})
+        if self.history is not None and self.history.error is not None:
+            raise _exception(self.history.error)
+        # Same filters as the repository: city case-insensitive, then the limit.
+        items = [
+            item
+            for item in self.saved + self._fixture_history()
+            if (city is None or item.city.lower() == city.lower())
+            and (country_code is None or item.country_code.upper() == country_code.upper())
+        ]
+        return items[:limit]
+
+    def _fixture_history(self) -> list[WeatherHistoryItem]:
         if self.history is None:
             return []
-        if self.history.error is not None:
-            raise _exception(self.history.error)
         items = []
-        entries = [
-            e
-            for e in self.history.entries
-            if (city is None or e.city.lower() == city.lower())
-            and (country_code is None or e.country_code.upper() == country_code.upper())
-        ]
-        for index, entry in enumerate(entries[:limit]):
+        for index, entry in enumerate(self.history.entries):
             fixture = self._all_locations[entry.location]
             weather = copy.deepcopy(fixture.forecast or {})
             weather["current"] = {**weather.get("current", {}), **entry.current}
@@ -75,6 +84,25 @@ class CaseBackend:
                 )
             )
         return items
+
+    def _save(self, city: str, country_code: str, response: WeatherResponse) -> None:
+        # Mirrors create_weather_lookup: the city as asked, the country upper-cased.
+        existing = self.saved + self._fixture_history()
+        newest = max((item.created_at for item in existing), default=None)
+        created_at = datetime.now(UTC)
+        if newest is not None and created_at <= newest:
+            created_at = newest + timedelta(minutes=1)  # keep newest-first order consistent
+        self.saved.insert(
+            0,
+            WeatherHistoryItem(
+                id=len(existing) + 1,
+                city=city,
+                country_code=country_code.upper(),
+                location=response.location,
+                weather=copy.deepcopy(response.weather),
+                created_at=created_at,
+            ),
+        )
 
 
 def _location(fixture: LocationFixture) -> WeatherLocation:

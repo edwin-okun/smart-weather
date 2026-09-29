@@ -143,6 +143,26 @@ class BackendTests(unittest.IsolatedAsyncioTestCase):
         [france] = await backend.get_weather_history(limit=1, city="Paris", country_code="fr")
         self.assertEqual((france.country_code, france.weather["current"]["temperature_2m"]), ("FR", 12.5))
 
+    async def test_current_lookups_are_saved_to_history_like_production(self) -> None:
+        backend = self._backend(fixtures=["nairobi"], history="recent")
+        [earlier] = await backend.get_weather_history(limit=1, city="Nairobi")
+        self.assertEqual(earlier.weather["current"]["temperature_2m"], 14.2)
+
+        await backend.get_weather_for_city("nairobi", "ke")
+
+        # Fetching current weather first means history now returns that new reading.
+        [latest] = await backend.get_weather_history(limit=1, city="Nairobi")
+        self.assertEqual((latest.city, latest.country_code), ("nairobi", "KE"))
+        self.assertEqual(latest.weather["current"]["temperature_2m"], 19.6)
+        self.assertGreater(latest.created_at, earlier.created_at)
+        newest_first = await backend.get_weather_history(limit=5)
+        self.assertEqual(newest_first[0], latest)
+        # Only the city filter matches it, and a failed lookup saves nothing.
+        self.assertEqual(await backend.get_weather_history(city="Nairobi", country_code="UG"), [])
+        with self.assertRaises(LocationNotFoundError):
+            await backend.get_weather_for_city("Atlantis")
+        self.assertEqual(len(backend.saved), 1)
+
     async def test_patched_service_refuses_without_active_backend(self) -> None:
         with self.assertRaises(RuntimeError):
             await _fake_get_weather_for_city("Nairobi")
