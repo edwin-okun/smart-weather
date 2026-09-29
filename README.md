@@ -30,11 +30,15 @@ This project uses `uv` and requires Python `3.14` or newer.
 uv sync
 ```
 
-### 2. Start the API
+### 2. Create the Database and Start the API
 
 ```bash
+uv run python -m app.cli migrate
 uv run fastapi dev
 ```
+
+`migrate` creates or upgrades the SQLite database at `DATABASE_URL`; see
+[Database Migrations](#database-migrations).
 
 The API runs at:
 
@@ -305,7 +309,8 @@ Settings are read from environment variables or `.env`. Copy `.env.example` to `
 | --- | --- | --- |
 | `APP_NAME` | `smart-weather` | FastAPI application title |
 | `DATABASE_URL` | `sqlite://smart_weather.sqlite3` | Database connection URL |
-| `GENERATE_DB_SCHEMAS` | `true` | Auto-create database tables on startup |
+| `RUN_DB_MIGRATIONS_ON_STARTUP` | `false` | Apply pending migrations when the app starts (single-process deployments only) |
+| `GENERATE_DB_SCHEMAS` | `false` | Create missing tables from the models on startup, bypassing migrations; for throwaway databases |
 | `WEATHER_CLIENT_TIMEOUT` | `10.0` | Open-Meteo request timeout in seconds |
 | `ACCESS_TOKEN_TTL_SECONDS` | `900` | Bearer token lifetime |
 | `AUTHORIZATION_CODE_TTL_SECONDS` | `300` | Authorization code lifetime |
@@ -332,7 +337,6 @@ Example local `.env`:
 
 ```dotenv
 DATABASE_URL=sqlite://smart_weather.sqlite3
-GENERATE_DB_SCHEMAS=true
 ACCESS_TOKEN_TTL_SECONDS=900
 REFRESH_TOKEN_TTL_SECONDS=2592000
 PUBLIC_BASE_URL=https://weather.example.com
@@ -353,6 +357,58 @@ Traces include the user's question and the model's answer. Set
 `LANGSMITH_HIDE_INPUTS=true` and `LANGSMITH_HIDE_OUTPUTS=true` if that is
 sensitive. Pending traces are flushed on shutdown.
 
+## Database Migrations
+
+The schema is managed by Tortoise ORM's built-in migrations in
+`app/migrations/`. The app no longer creates tables at startup:
+`GENERATE_DB_SCHEMAS` now defaults to `false`, because it only creates missing
+tables and never alters existing ones.
+
+Apply pending migrations (safe to re-run; it only moves forward):
+
+```bash
+uv run python -m app.cli migrate            # everything pending
+uv run python -m app.cli migrate --dry-run  # show the plan only
+```
+
+Run this as a deploy step before starting the new version. The app logs a
+warning at startup if migrations are pending. `RUN_DB_MIGRATIONS_ON_STARTUP=true`
+makes the app apply them itself, which is convenient for a single local
+process. Leave it off when several workers or replicas share a database,
+because they would race to run the same DDL.
+
+After changing a model, generate a migration, review it and its SQL, and commit it:
+
+```bash
+uv run python -m tortoise -c app.db.TORTOISE_ORM makemigrations -n short_description
+uv run python -m tortoise -c app.db.TORTOISE_ORM sqlmigrate models 0003
+```
+
+Other Tortoise commands use the same config: `history` (applied), `heads`
+(latest on disk) and `downgrade models <name>` (roll back to that migration).
+`tests/test_migrations.py` fails if the models and migrations disagree.
+
+### Adopting an Existing Database
+
+Databases created before migrations existed were built by
+`GENERATE_DB_SCHEMAS`. They have no migration history, so `migrate` would try
+to create tables that already exist. Back up the database, then record the
+schema the database already has as applied without running it (`--fake`),
+and apply the rest:
+
+```bash
+# Database created from main before migrations (no access_tokens.family_id):
+uv run python -m app.cli migrate 0001_initial --fake
+uv run python -m app.cli migrate
+
+# Database already created from these models (has family_id and weather_lookups.client_id):
+uv run python -m app.cli migrate --fake
+```
+
+`uv run python -m tortoise -c app.db.TORTOISE_ORM history` shows what is
+recorded. Only use `--fake` for migrations whose changes the database already
+has.
+
 ## Development Notes
 
 The project has no required weather API key because Open-Meteo is public.
@@ -361,7 +417,13 @@ The default database is a local SQLite file. To use a clean database for local
 experiments, point `DATABASE_URL` at another SQLite path:
 
 ```bash
-DATABASE_URL=sqlite:///tmp/smart_weather_dev.sqlite3 uv run fastapi dev
+DATABASE_URL=sqlite:///tmp/smart_weather_dev.sqlite3 RUN_DB_MIGRATIONS_ON_STARTUP=true uv run fastapi dev
+```
+
+Run the tests (in-memory SQLite, no network):
+
+```bash
+uv run pytest
 ```
 
 Run the CLI help:
