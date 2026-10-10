@@ -89,6 +89,9 @@ class MigrationTests(unittest.TestCase):
         self.assertIn("column family_id VARCHAR(64) notnull=0 pk=0", schema["access_tokens"])
         self.assertIn("column client_id INT notnull=0 pk=0", schema["weather_lookups"])
         self.assertIn(
+            "column location_region VARCHAR(120) notnull=0 pk=0", schema["weather_lookups"]
+        )
+        self.assertIn(
             "fk client_id -> api_clients.id on_delete=CASCADE", schema["weather_lookups"]
         )
         indexed = {
@@ -146,8 +149,10 @@ class MigrationTests(unittest.TestCase):
             [("t1", None)],
         )
         self.assertEqual(
-            con.execute("SELECT city, client_id FROM weather_lookups").fetchall(),
-            [("Nairobi", None)],
+            con.execute(
+                "SELECT city, client_id, location_region FROM weather_lookups"
+            ).fetchall(),
+            [("Nairobi", None, None)],
         )
         con.close()
 
@@ -155,6 +160,30 @@ class MigrationTests(unittest.TestCase):
         self.assertEqual(_schema(path), baseline)
         con = sqlite3.connect(path)
         self.assertEqual(con.execute("SELECT count(*) FROM weather_lookups").fetchone(), (1,))
+        con.close()
+
+    def test_downgrade_of_region_keeps_rows_and_indexes(self) -> None:
+        previous = "models.0002_token_family_and_client_history"
+        path = self.dir / "region.sqlite3"
+        asyncio.run(_migrate(path, target=previous))
+        before = _schema(path)
+        asyncio.run(_migrate(path))
+        con = sqlite3.connect(path)
+        with con:
+            con.execute(
+                "INSERT INTO weather_lookups (city, country_code, location_name, "
+                "location_region, latitude, longitude, weather, created_at) VALUES "
+                "('Springfield', 'US', 'Springfield', 'Missouri', 0, 0, '{}', '2026-01-01')"
+            )
+        con.close()
+
+        asyncio.run(_migrate(path, target=previous))
+        # A table rebuild on SQLite would drop weather_lookups' indexes.
+        self.assertEqual(_schema(path), before)
+        con = sqlite3.connect(path)
+        self.assertEqual(
+            con.execute("SELECT city FROM weather_lookups").fetchall(), [("Springfield",)]
+        )
         con.close()
 
 
@@ -175,8 +204,19 @@ class StartupMigrationCheckTests(unittest.TestCase):
 
     def test_startup_fails_while_migrations_are_pending(self) -> None:
         for target, pending in [
-            (None, ["models.0001_initial", "models.0002_token_family_and_client_history"]),
-            (BASELINE, ["models.0002_token_family_and_client_history"]),
+            (
+                None,
+                [
+                    "models.0001_initial",
+                    "models.0002_token_family_and_client_history",
+                    "models.0003_location_region",
+                ],
+            ),
+            (
+                BASELINE,
+                ["models.0002_token_family_and_client_history", "models.0003_location_region"],
+            ),
+            ("models.0002_token_family_and_client_history", ["models.0003_location_region"]),
         ]:
             with self.subTest(migrated_to=target):
                 if target is not None:

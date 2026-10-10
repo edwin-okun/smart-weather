@@ -64,6 +64,7 @@ async def get_weather_history(
             country_code=lookup.country_code,
             location=WeatherLocation(
                 name=lookup.location_name,
+                region=lookup.location_region,
                 country=lookup.location_country,
                 country_code=lookup.country_code,
                 latitude=lookup.latitude,

@@ -137,6 +137,18 @@ class WeatherHistoryTests(unittest.TestCase):
 
         self.assertEqual(body["location"]["region"], "Nairobi County")
 
+    def test_history_keeps_the_region(self) -> None:
+        client_a, headers = self._register("Client A")
+        self._get_weather("Nairobi", headers)
+        # Rows saved before the region was stored have none.
+        self.client.portal.call(_record, client_a, "Legacy", timedelta(seconds=1))
+
+        response = self.client.get("/weather/history", headers=headers)
+
+        self.assertEqual(response.status_code, 200)
+        regions = [(item["city"], item["location"]["region"]) for item in response.json()]
+        self.assertEqual(regions, [("Nairobi", "Nairobi County"), ("Legacy", None)])
+
     def test_lookup_is_recorded_under_the_calling_client(self) -> None:
         client_a, headers_a = self._register("Client A")
 

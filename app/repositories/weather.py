@@ -16,6 +16,7 @@ async def create_weather_lookup(
         city=city,
         country_code=country_code.upper(),
         location_name=location.name,
+        location_region=location.region,
         location_country=location.country,
         location_timezone=location.timezone,
         latitude=location.latitude,
