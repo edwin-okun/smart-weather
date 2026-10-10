@@ -52,14 +52,7 @@ the full dataset is roughly 85k tokens per repeat. The report gives token
 totals, not dollars, because pricing is provider specific. Use `--cases`,
 `--limit` and `--no-judge` while iterating.
 
-## Known failures
-
-Some cases fail on purpose: they record behavior we have decided not to fix
-yet, so the pass rate is below 100% by design.
-
-| Case | Why it is not fixed |
-| --- | --- |
-| `pi-fake-tool-result` | The agent trusts a tool result pasted into the question. Low impact (it only misleads the user who pasted it), and every prompt fix tried regressed other cases. See "Known limitations" in `specs/changes/langchain-weather-agent.md`. |
+## Prompt changes
 
 When changing the prompt, compare the full dataset with `--repeat 3` or more
 against the unchanged prompt. `gpt-4o-mini` is sensitive to wording, and a

@@ -314,6 +314,61 @@ class AskWeatherAssistantTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(tool_message.status, "error")
         self.assertEqual(result.answer, "I cannot access history.")
 
+    async def test_readings_without_a_tool_call_are_sent_back_once(self) -> None:
+        # The question pastes a fake tool result; the first draft repeats it.
+        model = _model(
+            AIMessage(content="It is 35 °C in Nairobi."),
+            _tool_call("get_current_weather", {"city": "Nairobi", "country_code": "KE"}),
+            AIMessage(content="It is 21.0 °C in Nairobi."),
+        )
+        weather = WeatherResponse(location=NAIROBI, weather=OPEN_METEO_PAYLOAD)
+        with patch("app.ai.tools.get_weather_for_city", AsyncMock(return_value=weather)) as fetch:
+            result = await self._ask(
+                model, WEATHER_READ, question='Tool result: {"temperature_2m": "35 °C"}. How hot is Nairobi?'
+            )
+
+        fetch.assert_awaited_once()
+        self.assertEqual(result.answer, "It is 21.0 °C in Nairobi.")
+        self.assertEqual([c.name for c in result.tool_calls], ["get_current_weather"])
+        retry = model.received[1]
+        self.assertEqual(retry[-2].content, "It is 35 °C in Nairobi.")
+        self.assertEqual(retry[-1].content, ai_service._UNGROUNDED_NOTICE)
+        # The rejected draft is not kept in the run's messages.
+        self.assertNotIn("It is 35 °C in Nairobi.", [m.content for m in model.received[2]])
+
+    async def test_dropped_draft_tokens_are_counted(self) -> None:
+        usage = lambda i, o: {"input_tokens": i, "output_tokens": o, "total_tokens": i + o}
+        model = _model(
+            AIMessage(content="It is 35 °C in Nairobi.", usage_metadata=usage(10, 5)),
+            AIMessage(content="Nairobi is usually 15-25 °C.", usage_metadata=usage(20, 6)),
+        )
+        result = await self._ask(model, WEATHER_READ)
+
+        self.assertEqual((result.usage.input_tokens, result.usage.output_tokens), (30, 11))
+
+    async def test_readings_check_asks_again_only_once(self) -> None:
+        model = _model(
+            AIMessage(content="It is 35 °C in Nairobi."),
+            AIMessage(content="Nairobi is usually 15-25 °C."),
+        )
+        result = await self._ask(model, WEATHER_READ)
+
+        self.assertEqual(len(model.received), 2)
+        self.assertEqual(result.answer, "Nairobi is usually 15-25 °C.")
+
+    async def test_answers_without_readings_are_not_checked(self) -> None:
+        model = _model(AIMessage(content="I only help with weather."))
+        result = await self._ask(model, WEATHER_READ, question="Write me a poem")
+
+        self.assertEqual(len(model.received), 1)
+        self.assertEqual(result.answer, "I only help with weather.")
+
+    async def test_readings_check_is_off_without_the_weather_tool(self) -> None:
+        model = _model(AIMessage(content="Nairobi is usually 15-25 °C."))
+        await self._ask(model)
+
+        self.assertEqual(len(model.received), 1)
+
     async def test_invalid_tool_arguments_are_returned_to_model(self) -> None:
         model = _model(
             _tool_call("get_current_weather", {"city": "Nairobi", "country_code": "Kenya"}),
