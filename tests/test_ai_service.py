@@ -13,7 +13,7 @@ from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from pydantic import Field, ValidationError
 
-from app.ai.prompts import TOOL_DATA, build_system_prompt
+from app.ai.prompts import AVAILABLE_TOOL_RULES, MISSING_TOOL_RULES, TOOL_DATA, build_system_prompt
 from app.ai.tools import (
     TOOL_SCOPES,
     build_tools,
@@ -121,7 +121,9 @@ class BuildToolsTests(unittest.TestCase):
         )
 
     def test_every_tool_has_access_text(self) -> None:
-        self.assertEqual(set(TOOL_DATA), {t.name for t, _ in TOOL_SCOPES})
+        names = {t.name for t, _ in TOOL_SCOPES}
+        self.assertEqual(set(TOOL_DATA), names)
+        self.assertLessEqual(set(AVAILABLE_TOOL_RULES) | set(MISSING_TOOL_RULES), names)
 
 
 class SystemPromptTests(unittest.TestCase):
@@ -132,6 +134,8 @@ class SystemPromptTests(unittest.TestCase):
 
         no_history = build_system_prompt({"get_current_weather"}, "2026-10-10")
         self.assertNotIn("never present them as current", no_history)
+        self.assertNotIn("look in past\n  lookups first", no_history)
+        self.assertIn("look in past\n  lookups first", full)
         self.assertIn("no access to: the history of past weather lookups made through this service.", no_history)
 
         history_only = build_system_prompt({"list_weather_history"}, "2026-10-10")
@@ -174,6 +178,14 @@ class ToolTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result["location"], "Tokyo, Japan")
 
+        for region, expected in (("Nairobi County", "Nairobi, Kenya"), ("Kenya", "Nairobi, Kenya"), (None, "Nairobi, Kenya")):
+            with self.subTest(region=region):
+                nairobi = NAIROBI.model_copy(update={"region": region})
+                weather = WeatherResponse(location=nairobi, weather=OPEN_METEO_PAYLOAD)
+                with patch("app.ai.tools.get_weather_for_city", AsyncMock(return_value=weather)):
+                    result = await get_current_weather.ainvoke({"city": "Nairobi"}, CLIENT_CONFIG)
+                self.assertEqual(result["location"], expected)
+
     async def test_history_filters_are_passed_to_the_service(self) -> None:
         with patch("app.ai.tools.get_weather_history", AsyncMock(return_value=[])) as fetch:
             await list_weather_history.ainvoke(
@@ -199,6 +211,16 @@ class ToolTests(unittest.IsolatedAsyncioTestCase):
 
         fetch.assert_awaited_once_with(api_client_id=1, limit=3, city=None, country_code=None)
         self.assertEqual(result[0]["location"], "Nairobi, Kenya")
+
+        springfield = WeatherLocation(
+            name="Springfield", region="Missouri", country="United States", latitude=37.2, longitude=-93.3
+        )
+        with patch(
+            "app.ai.tools.get_weather_history",
+            AsyncMock(return_value=[item.model_copy(update={"location": springfield})]),
+        ):
+            result = await list_weather_history.ainvoke({"limit": 3}, CLIENT_CONFIG)
+        self.assertEqual(result[0]["location"], "Springfield, Missouri, United States")
         self.assertEqual(result[0]["looked_up_at"], "2026-09-29T09:00:00+00:00")
         self.assertNotIn("elevation", str(result))
 

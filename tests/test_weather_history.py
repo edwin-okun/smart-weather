@@ -137,6 +137,20 @@ class WeatherHistoryTests(unittest.TestCase):
 
         self.assertEqual(body["location"]["region"], "Nairobi County")
 
+    def test_location_region_is_null_without_admin1(self) -> None:
+        _, headers = self._register("Client A")
+        result = GEOCODING_PAYLOAD["results"][0]
+        no_admin1 = {"results": [{k: v for k, v in result.items() if k != "admin1"}]}
+
+        with (
+            patch.object(open_meteo_client, "search_city", AsyncMock(return_value=no_admin1)),
+            patch.object(open_meteo_client, "get_forecast", AsyncMock(return_value=FORECAST_PAYLOAD)),
+        ):
+            response = self.client.get("/weather", params={"city": "Nairobi"}, headers=headers)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(response.json()["location"]["region"])
+
     def test_history_keeps_the_region(self) -> None:
         client_a, headers = self._register("Client A")
         self._get_weather("Nairobi", headers)

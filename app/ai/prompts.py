@@ -47,7 +47,7 @@ DATA_RULES_PROMPT = """\
   weather for each place without asking.
 - A question about weather on a future or past day (tomorrow, next week, this December,
   last month, a date) needs a forecast or a weather record, which you do not have:
-  say so. You may add the typical weather for that period, clearly labelled as typical.
+  say so.
 - A question about the usual pattern (usually, typically, on average, or a season or
   month in general) is about climate: answer it from general knowledge, without
   tools, and say it describes typical weather.
@@ -71,6 +71,15 @@ TOOL_DATA = {
     "list_weather_history": "the history of past weather lookups made through this service",
 }
 
+# Extra data rule when a tool is available.
+AVAILABLE_TOOL_RULES = {
+    "list_weather_history": (
+        "- For a question about a past day or an earlier check of a place, look in past\n"
+        "  lookups first. If one matches, give it as an earlier lookup with its time, not\n"
+        "  as a complete weather record; otherwise say you have no record."
+    ),
+}
+
 # Extra rule when a tool is missing, for data the client could mistake for it.
 MISSING_TOOL_RULES = {
     "get_current_weather": "Earlier lookups are past readings: never present them as current conditions.",
@@ -89,7 +98,7 @@ def build_system_prompt(tool_names: set[str], today: str) -> str:
         AUDIENCE_PROMPT,
         TONE_PROMPT,
         SCOPE_PROMPT,
-        DATA_RULES_PROMPT,
+        "\n".join([DATA_RULES_PROMPT, *(rule for name, rule in AVAILABLE_TOOL_RULES.items() if name in tool_names)]),
     ]
     missing = [data for name, data in TOOL_DATA.items() if name not in tool_names]
     if missing:
