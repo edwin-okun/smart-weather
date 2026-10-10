@@ -91,7 +91,8 @@ def _migrate(args: argparse.Namespace) -> int:
         return asyncio.run(run_cli_async(argv))
     except OperationalError as exc:
         print(f"\nmigration failed: {exc}", file=sys.stderr)
-        if "already exists" in str(exc):
+        # A table that already exists, or a column from faking too early a target.
+        if "already exists" in str(exc) or "duplicate column" in str(exc):
             print(
                 "This database has tables that were not created by migrations "
                 "(GENERATE_DB_SCHEMAS). Adopt it first: see 'Adopting an Existing "

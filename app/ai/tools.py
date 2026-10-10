@@ -98,7 +98,13 @@ async def list_weather_history(
 # answer (not the raw Open-Meteo payload): fewer tokens, and less third-party text
 # for a prompt injection to hide in.
 def _place(location: WeatherLocation) -> str:
-    return ", ".join(part for part in (location.name, location.country) if part)
+    # The region tells same-named places apart (Springfield, Missouri vs Illinois);
+    # skip it when it only restates the name or country (Tokyo, Tokyo; Nairobi,
+    # Nairobi County; Singapore, Singapore).
+    region = location.region
+    if region and (location.name.casefold() in region.casefold() or region == location.country):
+        region = None
+    return ", ".join(part for part in (location.name, region, location.country) if part)
 
 
 def _conditions(weather: dict[str, Any]) -> dict[str, Any]:

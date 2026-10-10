@@ -24,6 +24,7 @@ GEOCODING_PAYLOAD = {
     "results": [
         {
             "name": "Nairobi",
+            "admin1": "Nairobi County",
             "country": "Kenya",
             "country_code": "KE",
             "latitude": -1.28,
@@ -122,11 +123,45 @@ class WeatherHistoryTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         return [item["city"] for item in response.json()]
 
-    def _get_weather(self, city: str, headers: dict[str, str]) -> None:
+    def _get_weather(self, city: str, headers: dict[str, str]) -> dict:
         search, forecast = _mock_open_meteo()
         with search, forecast:
             response = self.client.get("/weather", params={"city": city}, headers=headers)
         self.assertEqual(response.status_code, 200)
+        return response.json()
+
+    def test_location_region_comes_from_geocoding(self) -> None:
+        _, headers = self._register("Client A")
+
+        body = self._get_weather("Nairobi", headers)
+
+        self.assertEqual(body["location"]["region"], "Nairobi County")
+
+    def test_location_region_is_null_without_admin1(self) -> None:
+        _, headers = self._register("Client A")
+        result = GEOCODING_PAYLOAD["results"][0]
+        no_admin1 = {"results": [{k: v for k, v in result.items() if k != "admin1"}]}
+
+        with (
+            patch.object(open_meteo_client, "search_city", AsyncMock(return_value=no_admin1)),
+            patch.object(open_meteo_client, "get_forecast", AsyncMock(return_value=FORECAST_PAYLOAD)),
+        ):
+            response = self.client.get("/weather", params={"city": "Nairobi"}, headers=headers)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(response.json()["location"]["region"])
+
+    def test_history_keeps_the_region(self) -> None:
+        client_a, headers = self._register("Client A")
+        self._get_weather("Nairobi", headers)
+        # Rows saved before the region was stored have none.
+        self.client.portal.call(_record, client_a, "Legacy", timedelta(seconds=1))
+
+        response = self.client.get("/weather/history", headers=headers)
+
+        self.assertEqual(response.status_code, 200)
+        regions = [(item["city"], item["location"]["region"]) for item in response.json()]
+        self.assertEqual(regions, [("Nairobi", "Nairobi County"), ("Legacy", None)])
 
     def test_lookup_is_recorded_under_the_calling_client(self) -> None:
         client_a, headers_a = self._register("Client A")
