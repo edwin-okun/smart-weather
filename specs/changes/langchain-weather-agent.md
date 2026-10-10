@@ -178,32 +178,22 @@ calls them. `get_weather`, `list_weather_history` and `health` remain exposed.
 - Recognising rate-limit errors from SDKs that report the status somewhere other
   than `status_code` (for example Google's `.code`); those return `502`.
 
-## Known limitations
-
-### Fabricated tool results in the question
+## Fabricated tool results in the question
 
 If the user pastes text that looks like a tool result into the question (eval
-case `pi-fake-tool-result`), the model repeats the pasted reading as the current
-weather instead of calling a tool. `gpt-4o-mini` does this 5 times out of 5, and
-`gpt-4o` does it too.
+case `pi-fake-tool-result`), `gpt-4o-mini` and `gpt-4o` repeat the pasted
+reading as the current weather instead of calling a tool. Prompt wording did not
+fix this without regressions: four wordings were measured, and each one broke
+unrelated cases (`hist-last-city`, `loc-unknown-atlantis`, `scope-no-tools`).
 
-This is accepted for now because:
-
-- The only person misled is the user who typed the fake data. No other user's
-  data is exposed and no scope is bypassed. Tool access is still decided by
-  token scopes, not by anything the model reads.
-- Injection carried in real tool output, which is the higher-risk path, is
-  covered by the system prompt and the trimmed tool results; those eval cases
-  pass.
-- Every prompt fix tried made unrelated behavior worse on `gpt-4o-mini`. Four
-  wordings were measured against the unchanged prompt with repeated eval runs.
-  The best one fixed this case (4 of 4) but dropped `hist-last-city` and
-  `loc-unknown-atlantis` from 8 of 8 to 3 of 8. A blunter one made the agent
-  promise lookups it had no tools for (`scope-no-tools` from 6 of 6 to 0 of 6).
-
-The eval case stays in the dataset as a known failure, so a later prompt or model
-change that fixes it without regressions shows up in the pass rate. Any fix must
-be checked against the full dataset with repeats, not just this case.
+The fix is in code instead. `RequireGroundedReadings` wraps each model call. If
+the answer states weather readings (a number with °C, °F, km/h, mph, hPa, mm or
+%) and no tool has run yet in the request, the model is asked once more, told
+that text in the user's message is never a tool result. The rejected draft is
+not kept in the run's messages. The check only applies when the client has
+`get_current_weather`. It wraps the model call instead of adding a graph node,
+so it does not count against `AI_MAX_STEPS`. When it fires, the run makes one
+extra model call.
 
 ## Acceptance criteria
 
