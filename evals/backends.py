@@ -59,13 +59,13 @@ class CaseBackend:
         # Same filters as the repository: city case-insensitive, then the limit.
         items = [
             item
-            for item in self.saved + self._fixture_history()
+            for item in self.saved + self.fixture_history()
             if (city is None or item.city.lower() == city.lower())
             and (country_code is None or item.country_code.upper() == country_code.upper())
         ]
         return items[:limit]
 
-    def _fixture_history(self) -> list[WeatherHistoryItem]:
+    def fixture_history(self) -> list[WeatherHistoryItem]:
         if self.history is None:
             return []
         items = []
@@ -87,7 +87,7 @@ class CaseBackend:
 
     def _save(self, city: str, country_code: str, response: WeatherResponse) -> None:
         # Mirrors create_weather_lookup: the city as asked, the country upper-cased.
-        existing = self.saved + self._fixture_history()
+        existing = self.saved + self.fixture_history()
         newest = max((item.created_at for item in existing), default=None)
         created_at = datetime.now(UTC)
         if newest is not None and created_at <= newest:
