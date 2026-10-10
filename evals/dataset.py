@@ -6,7 +6,7 @@ instead of scoring as a silent pass or fail.
 
 import hashlib
 import json
-from datetime import date
+from datetime import date, timedelta
 from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any, Literal
@@ -224,6 +224,7 @@ def fill_dates(value: Any, today: date) -> Any:
     if isinstance(value, str):
         replacements = {
             "{today}": today.isoformat(),
+            "{yesterday}": (today - timedelta(days=1)).isoformat(),
             "{today_month_day}": f"{today:%B} {today.day}",
             "{today_day_month}": f"{today.day} {today:%B}",
         }

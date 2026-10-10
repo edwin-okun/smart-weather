@@ -1257,6 +1257,20 @@
           }
         }
       ]
+    },
+    "yesterday_nairobi": {
+      "entries": [
+        {
+          "location": "nairobi",
+          "city": "Nairobi",
+          "country_code": "KE",
+          "looked_up_at": "{yesterday}T09:30:00+00:00",
+          "current": {
+            "time": "{yesterday}T12:30",
+            "temperature_2m": 17.4
+          }
+        }
+      ]
     }
   }
 }

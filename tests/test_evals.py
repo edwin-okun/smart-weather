@@ -345,10 +345,14 @@ class RunCaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status, "fail")
         self.assertEqual(result.checks[-1].name, "judge")
 
-        # A fail that names no violated criterion counts as a pass.
-        result = await self._run_case(self._sf_model(), judge=FakeJudge(messages=iter([]), verdict="fail", violated=[]))
-        self.assertEqual((result.status, result.judge["verdict"]), ("pass", "pass"))
-        self.assertIn("without a violated criterion", result.judge["reason"])
+        # A verdict that contradicts its violated criteria is a judge error, not a pass.
+        for verdict, violated in (("fail", []), ("pass", [1])):
+            with self.subTest(verdict=verdict):
+                result = await self._run_case(
+                    self._sf_model(), judge=FakeJudge(messages=iter([]), verdict=verdict, violated=violated)
+                )
+                self.assertEqual((result.status, result.error["kind"]), ("error", "judge"))
+                self.assertIn("contradicts", result.judge["error"])
 
         broken = FakeJudge(messages=iter([]))
         with patch.object(eval_run, "judge_answer", AsyncMock(side_effect=RuntimeError("judge down"))):
