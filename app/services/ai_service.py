@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 @dynamic_prompt
 def _system_prompt(request: ModelRequest) -> str:
     # Rendered per model call so a cached agent never serves a stale date.
-    tool_names = {t["name"] if isinstance(t, dict) else t.name for t in request.tools or []}
+    tool_names = {t.get("name") if isinstance(t, dict) else t.name for t in request.tools or []}
     return build_system_prompt(tool_names, today=date.today().isoformat())
 
 

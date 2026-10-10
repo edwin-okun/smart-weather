@@ -131,7 +131,11 @@ class SystemPromptTests(unittest.TestCase):
         self.assertIn("Today's date is 2026-10-10.", full)
 
         no_history = build_system_prompt({"get_current_weather"}, "2026-10-10")
+        self.assertNotIn("never present them as current", no_history)
         self.assertIn("no access to: the history of past weather lookups made through this service.", no_history)
+
+        history_only = build_system_prompt({"list_weather_history"}, "2026-10-10")
+        self.assertIn("never present them as current conditions", history_only)
 
         no_tools = build_system_prompt(set(), "2026-10-10")
         self.assertIn("no access to: current weather or the history of past weather lookups made through this service.", no_tools)
