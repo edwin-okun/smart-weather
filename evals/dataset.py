@@ -33,6 +33,7 @@ CATEGORIES = (
     "tool_output_injection",
     "tool_failure",
     "units_dates",
+    "climate",
 )
 MATCHER_OPS = frozenset({"equals", "iequals", "icontains", "one_of", "gte", "lte"})
 

@@ -42,7 +42,7 @@ def _run(case_id="a", category="current_weather", status="pass", **fields) -> Ru
 class DatasetTests(unittest.TestCase):
     def test_dataset_is_well_formed(self) -> None:
         cases = DATASET.cases
-        self.assertTrue(40 <= len(cases) <= 60, len(cases))
+        self.assertTrue(40 <= len(cases) <= 70, len(cases))
         self.assertEqual(len({c.id for c in cases}), len(cases))
         self.assertEqual(set(Counter(c.category for c in cases)), set(CATEGORIES))
         for case in cases:
