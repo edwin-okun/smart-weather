@@ -33,9 +33,19 @@ def _config(path: Path) -> dict:
     return config
 
 
-async def _migrate(path: Path, target: str | None = None) -> None:
+async def _migrate(path: Path, target: str | None = None, fake: bool = False) -> None:
     async with TortoiseContext():
-        await migrate(config=_config(path), target=target)
+        await migrate(config=_config(path), target=target, fake=fake)
+
+
+def _forget_migrations(path: Path) -> None:
+    """Make a database look built by GENERATE_DB_SCHEMAS: same tables, no history."""
+    con = sqlite3.connect(path)
+    try:
+        con.execute("DROP TABLE tortoise_migrations")
+        con.commit()
+    finally:
+        con.close()
 
 
 async def _generate_schemas(path: Path) -> None:
@@ -105,6 +115,31 @@ class MigrationTests(unittest.TestCase):
         self.assertIn("['created_at']", indexed)
 
         self.assertEqual(schema, _schema(generated))
+
+    def test_readme_adoption_recipes_reach_the_migrated_schema(self) -> None:
+        # Each recipe in the README's "Adopting an Existing Database": the schema
+        # the database already has, the --fake target, then a normal migrate.
+        fresh = self.dir / "fresh.sqlite3"
+        asyncio.run(_migrate(fresh))
+        recipes = {
+            "before migrations": ("models.0001_initial", "0001_initial"),
+            "scoped history, no region": (
+                "models.0002_token_family_and_client_history",
+                "0002_token_family_and_client_history",
+            ),
+            "current models": (None, None),
+        }
+        for label, (built_to, fake_to) in recipes.items():
+            with self.subTest(label):
+                path = self.dir / f"adopt-{label.replace(' ', '-')}.sqlite3"
+                if built_to is None:
+                    asyncio.run(_generate_schemas(path))
+                else:
+                    asyncio.run(_migrate(path, target=built_to))
+                    _forget_migrations(path)
+                asyncio.run(_migrate(path, target=fake_to and f"models.{fake_to}", fake=True))
+                asyncio.run(_migrate(path))
+                self.assertEqual(_schema(path), _schema(fresh))
 
     def test_models_have_no_changes_missing_a_migration(self) -> None:
         async def detect() -> list[str]:
