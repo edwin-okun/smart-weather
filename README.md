@@ -433,7 +433,7 @@ After changing a model, generate a migration, review it and its SQL, and commit 
 
 ```bash
 uv run python -m tortoise -c app.db.TORTOISE_ORM makemigrations -n short_description
-uv run python -m tortoise -c app.db.TORTOISE_ORM sqlmigrate models 0003
+uv run python -m tortoise -c app.db.TORTOISE_ORM sqlmigrate models 0004
 ```
 
 Other Tortoise commands use the same config: `history` (applied), `heads`
@@ -442,8 +442,8 @@ Other Tortoise commands use the same config: `history` (applied), `heads`
 
 On SQLite, check generated migrations carefully. Tortoise 1.1.8 does not
 create the index for a newly added indexed field, and some changes rebuild the
-whole table and lose its other indexes. `0002_token_family_and_client_history`
-works around this with small operation subclasses you can reuse.
+whole table and lose its other indexes. `0002_token_family_and_client_history` and `0003_location_region` work around
+this with small operation subclasses you can reuse.
 
 ### Adopting an Existing Database
 
@@ -458,14 +458,22 @@ and apply the rest:
 uv run smart-weather migrate 0001_initial --fake
 uv run smart-weather migrate
 
+# Created with GENERATE_DB_SCHEMAS after scoped history was added
+# (has access_tokens.family_id and weather_lookups.client_id, but no
+# weather_lookups.location_region):
+uv run smart-weather migrate 0002_token_family_and_client_history --fake
+uv run smart-weather migrate
+
 # Created with GENERATE_DB_SCHEMAS from the current models
-# (already has access_tokens.family_id and weather_lookups.client_id):
+# (also has weather_lookups.location_region):
 uv run smart-weather migrate --fake
 ```
 
+Always fake up to the last migration whose changes the database already has,
+never past it: a migration marked as applied without its changes leaves the
+schema behind while the startup check reports nothing pending.
 `uv run python -m tortoise -c app.db.TORTOISE_ORM history` shows what is
-recorded. Only use `--fake` for migrations whose changes the database already
-has. Lookups saved before history was scoped have no client, so they no
+recorded. Lookups saved before history was scoped have no client, so they no
 longer appear in anyone's history and are deleted once they pass the
 retention window.
 
