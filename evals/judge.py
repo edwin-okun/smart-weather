@@ -44,8 +44,7 @@ def fixture_view(dataset: Dataset, case: Case, today: date) -> dict[str, Any]:
         view["locations"] = {}
         for name in case.fixtures:
             fixture = dataset.fixtures.locations[name]
-            geo = fixture.geocoding
-            place = ", ".join(str(geo[k]) for k in ("name", "admin1", "country") if geo.get(k))
+            place = _place(fixture.geocoding)
             if fixture.error is not None:
                 view["locations"][name] = {"place": place, "error": fixture.error.message}
             else:
@@ -53,12 +52,27 @@ def fixture_view(dataset: Dataset, case: Case, today: date) -> dict[str, Any]:
                 view["locations"][name] = {"place": place, "current": forecast["current"], "units": forecast["current_units"]}
     if case.history and "list_weather_history" in tools:
         history = dataset.fixtures.history[case.history]
-        view["history"] = (
-            {"error": history.error.message}
-            if history.error
-            else [fill_dates(e.model_dump(), today) for e in history.entries]
-        )
+        if history.error:
+            view["history"] = {"error": history.error.message}
+        else:
+            # Each entry is served as its location's base reading with the entry's
+            # overrides on top (see CaseBackend._fixture_history). Showing only the
+            # overrides made the judge fail correct answers for the base values.
+            view["history"] = []
+            for entry in history.entries:
+                fixture = dataset.fixtures.locations[entry.location]
+                forecast = fill_dates(fixture.forecast or {}, today)
+                view["history"].append({
+                    "place": _place(fixture.geocoding),
+                    "looked_up_at": fill_dates(entry.looked_up_at, today),
+                    "current": {**forecast.get("current", {}), **fill_dates(entry.current, today)},
+                    "units": forecast.get("current_units", {}),
+                })
     return view
+
+
+def _place(geo: dict[str, Any]) -> str:
+    return ", ".join(str(geo[k]) for k in ("name", "admin1", "country") if geo.get(k))
 
 
 def judge_messages(dataset: Dataset, case: Case, answer: str, tool_results: list[dict[str, Any]], today: date) -> list[dict[str, str]]:

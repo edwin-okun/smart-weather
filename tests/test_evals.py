@@ -369,6 +369,11 @@ class RunCaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(evidence["backend_data"]["locations"]["mombasa"]["current"]["temperature_2m"], 29.1)
         self.assertEqual(evidence["tools_available_to_assistant"], ["get_current_weather"])
 
+        # History shows each entry as served: base reading plus the entry's overrides.
+        recent = next(c for c in DATASET.cases if c.id == "hist-recent")
+        tokyo = json.loads(judge_messages(DATASET, recent, "a", [], TODAY)[1]["content"])["backend_data"]["history"][0]
+        self.assertEqual((tokyo["current"]["temperature_2m"], tokyo["current"]["apparent_temperature"]), (23.9, 25.9))
+
         # Data behind a tool the caller lacks is not shown to the judge.
         denied = next(c for c in DATASET.cases if c.id == "scope-history-denied")
         self.assertNotIn("history", json.loads(judge_messages(DATASET, denied, "a", [], TODAY)[1]["content"])["backend_data"])
