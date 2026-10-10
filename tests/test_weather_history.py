@@ -24,6 +24,7 @@ GEOCODING_PAYLOAD = {
     "results": [
         {
             "name": "Nairobi",
+            "admin1": "Nairobi County",
             "country": "Kenya",
             "country_code": "KE",
             "latitude": -1.28,
@@ -122,11 +123,19 @@ class WeatherHistoryTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         return [item["city"] for item in response.json()]
 
-    def _get_weather(self, city: str, headers: dict[str, str]) -> None:
+    def _get_weather(self, city: str, headers: dict[str, str]) -> dict:
         search, forecast = _mock_open_meteo()
         with search, forecast:
             response = self.client.get("/weather", params={"city": city}, headers=headers)
         self.assertEqual(response.status_code, 200)
+        return response.json()
+
+    def test_location_region_comes_from_geocoding(self) -> None:
+        _, headers = self._register("Client A")
+
+        body = self._get_weather("Nairobi", headers)
+
+        self.assertEqual(body["location"]["region"], "Nairobi County")
 
     def test_lookup_is_recorded_under_the_calling_client(self) -> None:
         client_a, headers_a = self._register("Client A")

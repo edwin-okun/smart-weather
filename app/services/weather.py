@@ -111,6 +111,7 @@ async def _find_location(city: str, country_code: str) -> WeatherLocation:
         location = locations[0]
         return WeatherLocation(
             name=location["name"],
+            region=location.get("admin1"),
             country=location.get("country"),
             country_code=location.get("country_code"),
             latitude=location["latitude"],

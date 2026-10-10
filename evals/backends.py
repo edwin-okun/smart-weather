@@ -110,6 +110,7 @@ def _location(fixture: LocationFixture) -> WeatherLocation:
     geo = fixture.geocoding
     return WeatherLocation(
         name=geo["name"],
+        region=geo.get("admin1"),
         country=geo.get("country"),
         country_code=geo.get("country_code"),
         latitude=geo["latitude"],
