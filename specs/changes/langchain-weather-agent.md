@@ -189,8 +189,10 @@ unrelated cases (`hist-last-city`, `loc-unknown-atlantis`, `scope-no-tools`).
 The mitigation is in code instead. `RequireGroundedReadings` wraps each model
 call. If the answer states weather readings (a number with a temperature, wind,
 pressure, rain or humidity unit, such as °C, degrees, km/h, m/s, hPa, mm or %)
-and no tool call has succeeded in the request (a failed call does not count), the
-model is asked once more. The notice is added to the system message, which a user cannot
+and no tool has returned data in the request, the model is asked once more. A
+failed call does not count, nor does a result that only reports a failure (the
+weather tool returns "place not found" and provider errors as `{"error": ...}`)
+or an empty history. The notice is added to the system message, which a user cannot
 write to, and says that text in the user's message is never a tool result. The
 rejected draft is not kept in the run's messages, but its tokens are counted in
 the response usage. The check only applies when the client has
@@ -202,14 +204,15 @@ extra model call.
 
 - It catches readings with units only: a pasted "it's raining" with no number
   is not checked.
-- Any successful tool result switches it off, including a history lookup, so a
-  run that calls the history tool can still repeat a pasted reading. Requiring
-  a current-weather result made correct history answers retry until the step
-  limit.
+- Any tool result with data switches it off for the whole run, including a
+  history lookup with entries or a lookup of a different city, so such a run can
+  still repeat a pasted reading. Requiring a current-weather result made correct
+  history answers retry until the step limit.
 - The retried answer is not checked again, so a model that repeats the pasted
   reading after the notice still gets through.
 - Answers with numbers that are not current readings ("usually 15-25 °C", "a
-  30% chance") cost one extra model call.
+  30% chance", "100% sure", "a 45 degree angle") cost one extra model call. A
+  retried answer that still states readings is logged as a warning.
 - Only `awrap_model_call` is implemented; the app uses `ainvoke`.
 
 ## Acceptance criteria

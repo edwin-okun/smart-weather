@@ -28,6 +28,7 @@ from app.exceptions import (
     AITimeoutError,
     AIUpstreamError,
     LocationNotFoundError,
+    UpstreamServiceError,
 )
 from app.permissions import AI_ASK, WEATHER_HISTORY_READ, WEATHER_READ
 from app.routers import ai as ai_router
@@ -364,15 +365,52 @@ class AskWeatherAssistantTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(model.received), 3)
         self.assertEqual(result.answer, "I couldn't get the current weather for Nairobi.")
 
-    async def test_history_result_grounds_readings(self) -> None:
+    async def test_history_with_entries_grounds_readings(self) -> None:
+        item = WeatherHistoryItem(
+            id=1, city="nairobi", country_code="KE", location=NAIROBI, weather=OPEN_METEO_PAYLOAD,
+            created_at=datetime(2026, 9, 29, 9, 0, tzinfo=UTC),
+        )
         model = _model(
             _tool_call("list_weather_history", {"limit": 1}),
-            AIMessage(content="The last lookup was Nairobi at 14.2 °C."),
+            AIMessage(content="The last lookup was Nairobi at 21.0 °C."),
         )
-        with patch("app.ai.tools.get_weather_history", AsyncMock(return_value=[])):
+        with patch("app.ai.tools.get_weather_history", AsyncMock(return_value=[item])):
             await self._ask(model, WEATHER_READ, WEATHER_HISTORY_READ)
 
         self.assertEqual(len(model.received), 2)
+
+    async def test_empty_or_error_results_do_not_ground_readings(self) -> None:
+        # An empty history, and known weather failures the tool returns as data.
+        cases = {
+            "empty history": (
+                _tool_call("list_weather_history", {"limit": 1}),
+                "app.ai.tools.get_weather_history",
+                AsyncMock(return_value=[]),
+            ),
+            "place not found": (
+                _tool_call("get_current_weather", {"city": "Atlantis", "country_code": "GR"}),
+                "app.ai.tools.get_weather_for_city",
+                AsyncMock(side_effect=LocationNotFoundError("No location found for city Atlantis")),
+            ),
+            "provider down": (
+                _tool_call("get_current_weather", {"city": "Nairobi", "country_code": "KE"}),
+                "app.ai.tools.get_weather_for_city",
+                AsyncMock(side_effect=UpstreamServiceError("timeout")),
+            ),
+        }
+        for label, (first_call, target, mock) in cases.items():
+            with self.subTest(label):
+                ai_service._get_agent.cache_clear()  # the agent holds the previous model
+                model = _model(
+                    first_call,
+                    AIMessage(content="It is 35 °C in Nairobi."),
+                    AIMessage(content="I couldn't get the current weather for Nairobi."),
+                )
+                with patch(target, mock):
+                    result = await self._ask(model, WEATHER_READ, WEATHER_HISTORY_READ)
+
+                self.assertEqual(len(model.received), 3)
+                self.assertEqual(result.answer, "I couldn't get the current weather for Nairobi.")
 
     async def test_draft_without_usage_is_handled(self) -> None:
         usage = {"input_tokens": 20, "output_tokens": 6, "total_tokens": 26}
@@ -383,6 +421,37 @@ class AskWeatherAssistantTests(unittest.IsolatedAsyncioTestCase):
         result = await self._ask(model, WEATHER_READ)
 
         self.assertEqual((result.usage.input_tokens, result.usage.output_tokens), (20, 6))
+
+    async def test_retry_request_and_draft_are_not_kept(self) -> None:
+        model = _model(
+            AIMessage(content="It is 35 °C in Nairobi."),
+            _tool_call("get_current_weather", {"city": "Nairobi", "country_code": "KE"}),
+            AIMessage(content="It is 21.0 °C in Nairobi."),
+        )
+        weather = WeatherResponse(location=NAIROBI, weather=OPEN_METEO_PAYLOAD)
+        with patch("app.ai.tools.get_weather_for_city", AsyncMock(return_value=weather)):
+            await self._ask(model, WEATHER_READ)
+
+        # The call after the tool sees the run's real messages only.
+        final_call = [m.content for m in model.received[2]]
+        self.assertNotIn(ai_service._RETRY_REQUEST, final_call)
+        self.assertNotIn("It is 35 °C in Nairobi.", final_call)
+        self.assertNotIn(ai_service._UNGROUNDED_NOTICE, model.received[2][0].content)
+
+    async def test_draft_tokens_are_counted_when_the_retry_calls_a_tool(self) -> None:
+        usage = lambda i, o: {"input_tokens": i, "output_tokens": o, "total_tokens": i + o}
+        retry_call = _tool_call("get_current_weather", {"city": "Nairobi", "country_code": "KE"})
+        retry_call.usage_metadata = usage(20, 6)
+        model = _model(
+            AIMessage(content="It is 35 °C in Nairobi.", usage_metadata=usage(10, 5)),
+            retry_call,
+            AIMessage(content="It is 21.0 °C in Nairobi.", usage_metadata=usage(30, 7)),
+        )
+        weather = WeatherResponse(location=NAIROBI, weather=OPEN_METEO_PAYLOAD)
+        with patch("app.ai.tools.get_weather_for_city", AsyncMock(return_value=weather)):
+            result = await self._ask(model, WEATHER_READ)
+
+        self.assertEqual((result.usage.input_tokens, result.usage.output_tokens), (60, 18))
 
     async def test_dropped_draft_tokens_are_counted(self) -> None:
         usage = lambda i, o: {"input_tokens": i, "output_tokens": o, "total_tokens": i + o}
@@ -567,10 +636,17 @@ class AskWeatherAssistantTests(unittest.IsolatedAsyncioTestCase):
 
 class ReadingPatternTests(unittest.TestCase):
     def test_readings_and_non_readings(self) -> None:
-        for text in ("35 °C", "35°", "35 degrees", "35℃", "95F", "12 km/h", "12 m/s", "1012 hPa", "1012 mb", "3 mm", "70%", "60 percent"):
+        for text in (
+            "35 °C", "35°", "35 degrees", "35℃", "95F", "25ºC", "25˚C", "25 Celsius", "77 Fahrenheit", "300 K",
+            "12 km/h", "12 m/s", "12 kt", "5 kn", "1012 hPa", "1012 mb", "1013 millibars", "3 mm", "70%",
+            "60 percent", "60 per cent",
+        ):
             with self.subTest(text):
                 self.assertTrue(ai_service._READING.search(text))
-        for text in ("in 2 days", "Route 66 is closed", "I have 3 options", "since 2020"):
+        for text in (
+            "in 2 days", "Route 66 is closed", "I have 3 options", "since 2020",
+            "a 5 MB file", "Python 3 c extension", "I can help with 2 c", "Step 1\nC is next",
+        ):
             with self.subTest(text):
                 self.assertFalse(ai_service._READING.search(text))
 

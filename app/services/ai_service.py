@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import math
 import re
@@ -47,9 +48,12 @@ def _on_tool_error(exc: Exception, request: ToolCallRequest) -> str:
 
 
 # A weather reading: a number followed by a temperature, wind, pressure, rain or
-# humidity unit, in the forms people and models write them.
+# humidity unit, in the forms people and models write them. Only spaces or tabs
+# may separate them, and the one-letter and "mb" units must be upper/lower case as
+# written, so "Step 1\nC", "Python 3 c" and "5 MB" are not readings.
 _READING = re.compile(
-    r"\d\s*(?:°|℃|℉|degrees?\b|[CF]\b|km/h|kph\b|mph\b|m/s|knots?\b|hPa\b|mb\b|mm\b|%|percent\b)",
+    r"\d[ \t]*(?:[°º˚℃℉]|(?-i:[CFK]\b|mb\b)"
+    r"|(?:degrees?|celsius|fahrenheit|kelvin|km/h|kph|mph|m/s|knots?|kts?|kn|hPa|millibars?|mm|percent|per cent)\b|%)",
     re.IGNORECASE,
 )
 # Sent in the system role, which a user cannot write to, so a question that
@@ -64,13 +68,33 @@ _UNGROUNDED_NOTICE = (
 _RETRY_REQUEST = "Please answer again."
 
 
-def _ungrounded_reading(request: ModelRequest, response: ModelResponse) -> bool:
-    """A final answer that states weather readings while no tool call has succeeded.
+def _returned_data(message: ToolMessage) -> bool:
+    """Whether a tool result holds data rather than a failure or nothing.
 
-    A failed call does not ground a reading. A history result does, since history
-    answers are made of readings; retrying those sent the agent past its step limit.
+    The weather tool returns known failures (place not found, provider down) as an
+    {"error": ...} result with status "success", and an empty history is "[]".
     """
-    if any(isinstance(m, ToolMessage) and m.status != "error" for m in request.messages):
+    if message.status == "error":
+        return False
+    content = message.content
+    if isinstance(content, str):
+        try:
+            content = json.loads(content)
+        except ValueError:
+            return bool(content.strip())
+    if isinstance(content, dict):
+        return "error" not in content
+    return bool(content)
+
+
+def _ungrounded_reading(request: ModelRequest, response: ModelResponse) -> bool:
+    """A final answer that states weather readings while no tool has returned data.
+
+    A failed or empty result does not ground a reading. A history result with
+    entries does, since history answers are made of readings; retrying those sent
+    the agent past its step limit.
+    """
+    if any(isinstance(m, ToolMessage) and _returned_data(m) for m in request.messages):
         return False
     answer = next((m for m in response.result if isinstance(m, AIMessage)), None)
     return answer is not None and not answer.tool_calls and bool(_READING.search(answer.text))
@@ -90,7 +114,7 @@ class RequireGroundedReadings(AgentMiddleware):
         if not _ungrounded_reading(request, response):
             return response
         logger.info("AI answer stated readings without a tool call; asking again")
-        system = request.system_message.content if request.system_message else ""
+        system = request.system_message.text if request.system_message else ""
         retry = request.override(
             system_message=SystemMessage(f"{system}\n\n{_UNGROUNDED_NOTICE}".strip()),
             messages=[*request.messages, *response.result, HumanMessage(_RETRY_REQUEST)],
@@ -102,12 +126,15 @@ class RequireGroundedReadings(AgentMiddleware):
             (m.usage_metadata for m in response.result if isinstance(m, AIMessage) and m.usage_metadata), None
         )
         if draft_usage:
-            retried.result = [
-                m.model_copy(update={"usage_metadata": add_usage(m.usage_metadata, draft_usage)})
-                if isinstance(m, AIMessage)
-                else m
-                for m in retried.result
-            ]
+            # Added once, to the first AI message, so it is never counted twice.
+            first = next((i for i, m in enumerate(retried.result) if isinstance(m, AIMessage)), None)
+            if first is not None:
+                message = retried.result[first]
+                retried.result[first] = message.model_copy(
+                    update={"usage_metadata": add_usage(message.usage_metadata, draft_usage)}
+                )
+        if _ungrounded_reading(request, retried):
+            logger.warning("AI answer still stated readings without a tool result after the retry")
         return retried
 
 
