@@ -9,7 +9,7 @@ import httpx
 import openai
 from fastapi import HTTPException
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from pydantic import Field, ValidationError
 
@@ -332,9 +332,57 @@ class AskWeatherAssistantTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([c.name for c in result.tool_calls], ["get_current_weather"])
         retry = model.received[1]
         self.assertEqual(retry[-2].content, "It is 35 °C in Nairobi.")
-        self.assertEqual(retry[-1].content, ai_service._UNGROUNDED_NOTICE)
+        self.assertEqual(retry[-1].content, ai_service._RETRY_REQUEST)
+        # The notice goes in the system role, after the normal system prompt.
+        self.assertIsInstance(retry[0], SystemMessage)
+        self.assertIn("Today's date is", retry[0].content)
+        self.assertTrue(retry[0].content.endswith(ai_service._UNGROUNDED_NOTICE))
         # The rejected draft is not kept in the run's messages.
         self.assertNotIn("It is 35 °C in Nairobi.", [m.content for m in model.received[2]])
+
+    async def test_readings_after_a_weather_lookup_are_not_checked(self) -> None:
+        model = _model(
+            _tool_call("get_current_weather", {"city": "Nairobi", "country_code": "KE"}),
+            AIMessage(content="It is 21.0 °C in Nairobi."),
+        )
+        weather = WeatherResponse(location=NAIROBI, weather=OPEN_METEO_PAYLOAD)
+        with patch("app.ai.tools.get_weather_for_city", AsyncMock(return_value=weather)):
+            result = await self._ask(model, WEATHER_READ)
+
+        self.assertEqual(len(model.received), 2)
+        self.assertEqual(result.answer, "It is 21.0 °C in Nairobi.")
+
+    async def test_failed_lookup_does_not_ground_readings(self) -> None:
+        # Invalid arguments: the lookup fails with an error ToolMessage.
+        model = _model(
+            _tool_call("get_current_weather", {"city": "Nairobi", "country_code": "Kenya"}),
+            AIMessage(content="It is 35 °C in Nairobi."),
+            AIMessage(content="I couldn't get the current weather for Nairobi."),
+        )
+        result = await self._ask(model, WEATHER_READ)
+
+        self.assertEqual(len(model.received), 3)
+        self.assertEqual(result.answer, "I couldn't get the current weather for Nairobi.")
+
+    async def test_history_result_grounds_readings(self) -> None:
+        model = _model(
+            _tool_call("list_weather_history", {"limit": 1}),
+            AIMessage(content="The last lookup was Nairobi at 14.2 °C."),
+        )
+        with patch("app.ai.tools.get_weather_history", AsyncMock(return_value=[])):
+            await self._ask(model, WEATHER_READ, WEATHER_HISTORY_READ)
+
+        self.assertEqual(len(model.received), 2)
+
+    async def test_draft_without_usage_is_handled(self) -> None:
+        usage = {"input_tokens": 20, "output_tokens": 6, "total_tokens": 26}
+        model = _model(
+            AIMessage(content="It is 35 °C in Nairobi."),
+            AIMessage(content="Nairobi is usually 15-25 °C.", usage_metadata=usage),
+        )
+        result = await self._ask(model, WEATHER_READ)
+
+        self.assertEqual((result.usage.input_tokens, result.usage.output_tokens), (20, 6))
 
     async def test_dropped_draft_tokens_are_counted(self) -> None:
         usage = lambda i, o: {"input_tokens": i, "output_tokens": o, "total_tokens": i + o}
@@ -515,6 +563,16 @@ class AskWeatherAssistantTests(unittest.IsolatedAsyncioTestCase):
             self.assertIs(read_only, ai_service._get_agent(frozenset({WEATHER_READ})))
             self.assertIsNot(read_only, ai_service._get_agent(frozenset()))
         self.assertEqual(get_model.call_count, 2)
+
+
+class ReadingPatternTests(unittest.TestCase):
+    def test_readings_and_non_readings(self) -> None:
+        for text in ("35 °C", "35°", "35 degrees", "35℃", "95F", "12 km/h", "12 m/s", "1012 hPa", "1012 mb", "3 mm", "70%", "60 percent"):
+            with self.subTest(text):
+                self.assertTrue(ai_service._READING.search(text))
+        for text in ("in 2 days", "Route 66 is closed", "I have 3 options", "since 2020"):
+            with self.subTest(text):
+                self.assertFalse(ai_service._READING.search(text))
 
 
 class ProviderRateLimitTests(unittest.TestCase):
