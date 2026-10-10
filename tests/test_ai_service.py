@@ -131,10 +131,10 @@ class SystemPromptTests(unittest.TestCase):
         self.assertIn("Today's date is 2026-10-10.", full)
 
         no_history = build_system_prompt({"get_current_weather"}, "2026-10-10")
-        self.assertIn("no access to: weather lookup history.", no_history)
+        self.assertIn("no access to: the history of past weather lookups made through this service.", no_history)
 
         no_tools = build_system_prompt(set(), "2026-10-10")
-        self.assertIn("no access to: current weather or weather lookup history.", no_tools)
+        self.assertIn("no access to: current weather or the history of past weather lookups made through this service.", no_tools)
 
 
 class ToolTests(unittest.IsolatedAsyncioTestCase):
@@ -272,7 +272,7 @@ class AskWeatherAssistantTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("untrusted", system_prompt)
         self.assertIn("Today's date is", system_prompt)
         # Rendered from this run's tools: weather:read alone has no history tool.
-        self.assertIn("no access to: weather lookup history.", system_prompt)
+        self.assertIn("no access to: the history of past weather lookups made through this service.", system_prompt)
 
     async def test_tool_outside_scope_is_not_executed(self) -> None:
         model = _model(
