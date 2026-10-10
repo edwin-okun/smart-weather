@@ -1,8 +1,8 @@
 """System prompt for the weather assistant, one constant per section.
 
 Edit only the section a change is about, then compare the full eval dataset
-against the unchanged prompt (see evals/README.md). SYSTEM_PROMPT keeps a
-`{today}` placeholder, so sections must not contain other braces.
+against the unchanged prompt (see evals/README.md). build_system_prompt joins
+the sections for one run.
 """
 
 PURPOSE_PROMPT = """\
@@ -52,14 +52,30 @@ OUTPUT_PROMPT = """\
 Be precise and brief: lead with the direct answer, include units (e.g. °C, km/h, mm)
 and the place and time the data refers to, and add detail only when asked."""
 
-SYSTEM_PROMPT = "\n\n".join(
-    [
+# Data each tool provides. A section naming the data a client's tools do not cover
+# is added per run, so the agent says it has no access instead of offering a
+# lookup it cannot make.
+TOOL_DATA = {
+    "get_current_weather": "current weather",
+    "list_weather_history": "weather lookup history",
+}
+
+ACCESS_PROMPT = """\
+# Access
+For this client you have no access to: {missing}. If asked for it, say you do not
+have access to it. Do not offer to look it up or say you are fetching it."""
+
+
+def build_system_prompt(tool_names: set[str], today: str) -> str:
+    sections = [
         PURPOSE_PROMPT,
         AUDIENCE_PROMPT,
         TONE_PROMPT,
         SCOPE_PROMPT,
         DATA_RULES_PROMPT,
-        OUTPUT_PROMPT,
-        "Today's date is {today}.",
     ]
-)
+    missing = [data for name, data in TOOL_DATA.items() if name not in tool_names]
+    if missing:
+        sections.append(ACCESS_PROMPT.format(missing=" or ".join(missing)))
+    sections += [OUTPUT_PROMPT, f"Today's date is {today}."]
+    return "\n\n".join(sections)

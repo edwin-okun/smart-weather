@@ -12,7 +12,7 @@ from langchain_core.messages import AIMessage
 from langgraph.errors import GraphRecursionError
 
 from app.ai.models import get_chat_model
-from app.ai.prompts import SYSTEM_PROMPT
+from app.ai.prompts import build_system_prompt
 from app.ai.tools import TOOL_REQUIRED_SCOPES, build_tools, run_config_for_client
 from app.config import settings
 from app.exceptions import AIRateLimitError, AIStepLimitError, AITimeoutError, AIUpstreamError
@@ -25,7 +25,8 @@ logger = logging.getLogger(__name__)
 @dynamic_prompt
 def _system_prompt(request: ModelRequest) -> str:
     # Rendered per model call so a cached agent never serves a stale date.
-    return SYSTEM_PROMPT.format(today=date.today().isoformat())
+    tool_names = {t["name"] if isinstance(t, dict) else t.name for t in request.tools or []}
+    return build_system_prompt(tool_names, today=date.today().isoformat())
 
 
 def _on_tool_error(exc: Exception, request: ToolCallRequest) -> str:

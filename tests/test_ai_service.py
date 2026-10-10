@@ -13,7 +13,9 @@ from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from pydantic import Field, ValidationError
 
+from app.ai.prompts import TOOL_DATA, build_system_prompt
 from app.ai.tools import (
+    TOOL_SCOPES,
     build_tools,
     get_current_weather,
     list_weather_history,
@@ -118,6 +120,22 @@ class BuildToolsTests(unittest.TestCase):
             {"get_current_weather", "list_weather_history"},
         )
 
+    def test_every_tool_has_access_text(self) -> None:
+        self.assertEqual(set(TOOL_DATA), {t.name for t, _ in TOOL_SCOPES})
+
+
+class SystemPromptTests(unittest.TestCase):
+    def test_access_section_names_only_missing_data(self) -> None:
+        full = build_system_prompt({"get_current_weather", "list_weather_history"}, "2026-10-10")
+        self.assertNotIn("# Access", full)
+        self.assertIn("Today's date is 2026-10-10.", full)
+
+        no_history = build_system_prompt({"get_current_weather"}, "2026-10-10")
+        self.assertIn("no access to: weather lookup history.", no_history)
+
+        no_tools = build_system_prompt(set(), "2026-10-10")
+        self.assertIn("no access to: current weather or weather lookup history.", no_tools)
+
 
 class ToolTests(unittest.IsolatedAsyncioTestCase):
     async def test_current_weather_is_trimmed(self) -> None:
@@ -134,6 +152,23 @@ class ToolTests(unittest.IsolatedAsyncioTestCase):
                 "current": {"temperature_2m": "21.0 °C"},
             },
         )
+
+    async def test_location_includes_region(self) -> None:
+        springfield = WeatherLocation(
+            name="Springfield", region="Missouri", country="United States", latitude=37.2, longitude=-93.3
+        )
+        weather = WeatherResponse(location=springfield, weather=OPEN_METEO_PAYLOAD)
+        with patch("app.ai.tools.get_weather_for_city", AsyncMock(return_value=weather)):
+            result = await get_current_weather.ainvoke({"city": "Springfield"}, CLIENT_CONFIG)
+
+        self.assertEqual(result["location"], "Springfield, Missouri, United States")
+
+        tokyo = WeatherLocation(name="Tokyo", region="Tokyo", country="Japan", latitude=35.7, longitude=139.7)
+        weather = WeatherResponse(location=tokyo, weather=OPEN_METEO_PAYLOAD)
+        with patch("app.ai.tools.get_weather_for_city", AsyncMock(return_value=weather)):
+            result = await get_current_weather.ainvoke({"city": "Tokyo"}, CLIENT_CONFIG)
+
+        self.assertEqual(result["location"], "Tokyo, Japan")
 
     async def test_history_filters_are_passed_to_the_service(self) -> None:
         with patch("app.ai.tools.get_weather_history", AsyncMock(return_value=[])) as fetch:
@@ -236,6 +271,8 @@ class AskWeatherAssistantTests(unittest.IsolatedAsyncioTestCase):
         system_prompt = model.received[0][0].content
         self.assertIn("untrusted", system_prompt)
         self.assertIn("Today's date is", system_prompt)
+        # Rendered from this run's tools: weather:read alone has no history tool.
+        self.assertIn("no access to: weather lookup history.", system_prompt)
 
     async def test_tool_outside_scope_is_not_executed(self) -> None:
         model = _model(
