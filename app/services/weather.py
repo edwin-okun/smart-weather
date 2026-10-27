@@ -64,6 +64,7 @@ async def get_weather_history(
             country_code=lookup.country_code,
             location=WeatherLocation(
                 name=lookup.location_name,
+                region=lookup.location_region,
                 country=lookup.location_country,
                 country_code=lookup.country_code,
                 latitude=lookup.latitude,
@@ -111,6 +112,7 @@ async def _find_location(city: str, country_code: str) -> WeatherLocation:
         location = locations[0]
         return WeatherLocation(
             name=location["name"],
+            region=location.get("admin1"),
             country=location.get("country"),
             country_code=location.get("country_code"),
             latitude=location["latitude"],

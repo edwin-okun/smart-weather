@@ -42,7 +42,7 @@ def _run(case_id="a", category="current_weather", status="pass", **fields) -> Ru
 class DatasetTests(unittest.TestCase):
     def test_dataset_is_well_formed(self) -> None:
         cases = DATASET.cases
-        self.assertTrue(40 <= len(cases) <= 60, len(cases))
+        self.assertTrue(40 <= len(cases) <= 70, len(cases))
         self.assertEqual(len({c.id for c in cases}), len(cases))
         self.assertEqual(set(Counter(c.category for c in cases)), set(CATEGORIES))
         for case in cases:
@@ -289,10 +289,12 @@ class FakeJudge(ToolCallingFakeModel):
     """Returns a fixed verdict through with_structured_output."""
 
     verdict: str = "pass"
+    violated: list[int] | None = None  # default: [] for pass, [1] for fail
 
     def with_structured_output(self, schema, include_raw=False, **kwargs):
         raw = AIMessage(content="", usage_metadata={"input_tokens": 40, "output_tokens": 8, "total_tokens": 48})
-        return RunnableLambda(lambda _: {"raw": raw, "parsed": Verdict(reason="grounded", verdict=self.verdict), "parsing_error": None})
+        violated = self.violated if self.violated is not None else ([] if self.verdict == "pass" else [1])
+        return RunnableLambda(lambda _: {"raw": raw, "parsed": Verdict(reason="grounded", violated=violated, verdict=self.verdict), "parsing_error": None})
 
 
 class RunCaseTests(unittest.IsolatedAsyncioTestCase):
@@ -325,7 +327,7 @@ class RunCaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(tool_result["status"], "success")
         self.assertIn("16.4 °C", tool_result["content"])
         self.assertIn("United States", tool_result["content"])
-        self.assertEqual(result.judge, {"reason": "grounded", "verdict": "pass"})
+        self.assertEqual(result.judge, {"reason": "grounded", "violated": [], "verdict": "pass"})
         self.assertEqual(result.judge_usage, {"input_tokens": 40, "output_tokens": 8})
         self.assertEqual(result.usage, {"input_tokens": 30, "output_tokens": 9})
 
@@ -342,6 +344,15 @@ class RunCaseTests(unittest.IsolatedAsyncioTestCase):
         result = await self._run_case(self._sf_model(), judge=FakeJudge(messages=iter([]), verdict="fail"))
         self.assertEqual(result.status, "fail")
         self.assertEqual(result.checks[-1].name, "judge")
+
+        # A verdict that contradicts its violated criteria is a judge error, not a pass.
+        for verdict, violated in (("fail", []), ("pass", [1])):
+            with self.subTest(verdict=verdict):
+                result = await self._run_case(
+                    self._sf_model(), judge=FakeJudge(messages=iter([]), verdict=verdict, violated=violated)
+                )
+                self.assertEqual((result.status, result.error["kind"]), ("error", "judge"))
+                self.assertIn("contradicts", result.judge["error"])
 
         broken = FakeJudge(messages=iter([]))
         with patch.object(eval_run, "judge_answer", AsyncMock(side_effect=RuntimeError("judge down"))):
@@ -366,8 +377,15 @@ class RunCaseTests(unittest.IsolatedAsyncioTestCase):
         system, user = judge_messages(DATASET, case, "answer", [], TODAY)
         self.assertIn("Mombasa (29.1 °C) is warmer", system["content"])
         evidence = json.loads(user["content"])
-        self.assertEqual(evidence["backend_data"]["locations"]["mombasa"]["current"]["temperature_2m"], 29.1)
+        self.assertEqual(evidence["backend_data"]["locations"]["mombasa"]["current"]["temperature_2m"], "29.1 °C")
         self.assertEqual(evidence["tools_available_to_assistant"], ["get_current_weather"])
+
+        # History shows each entry as served: base reading plus the entry's overrides.
+        recent = next(c for c in DATASET.cases if c.id == "hist-recent")
+        tokyo = json.loads(judge_messages(DATASET, recent, "a", [], TODAY)[1]["content"])["backend_data"]["history"][0]
+        self.assertEqual((tokyo["current"]["temperature_2m"], tokyo["current"]["apparent_temperature"]), ("23.9 °C", "25.9 °C"))
+        # Same place string as the tool: a region repeating the name is dropped.
+        self.assertEqual(tokyo["location"], "Tokyo, Japan")
 
         # Data behind a tool the caller lacks is not shown to the judge.
         denied = next(c for c in DATASET.cases if c.id == "scope-history-denied")

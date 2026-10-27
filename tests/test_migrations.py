@@ -33,9 +33,19 @@ def _config(path: Path) -> dict:
     return config
 
 
-async def _migrate(path: Path, target: str | None = None) -> None:
+async def _migrate(path: Path, target: str | None = None, fake: bool = False) -> None:
     async with TortoiseContext():
-        await migrate(config=_config(path), target=target)
+        await migrate(config=_config(path), target=target, fake=fake)
+
+
+def _forget_migrations(path: Path) -> None:
+    """Make a database look built by GENERATE_DB_SCHEMAS: same tables, no history."""
+    con = sqlite3.connect(path)
+    try:
+        con.execute("DROP TABLE tortoise_migrations")
+        con.commit()
+    finally:
+        con.close()
 
 
 async def _generate_schemas(path: Path) -> None:
@@ -89,6 +99,9 @@ class MigrationTests(unittest.TestCase):
         self.assertIn("column family_id VARCHAR(64) notnull=0 pk=0", schema["access_tokens"])
         self.assertIn("column client_id INT notnull=0 pk=0", schema["weather_lookups"])
         self.assertIn(
+            "column location_region VARCHAR(120) notnull=0 pk=0", schema["weather_lookups"]
+        )
+        self.assertIn(
             "fk client_id -> api_clients.id on_delete=CASCADE", schema["weather_lookups"]
         )
         indexed = {
@@ -102,6 +115,31 @@ class MigrationTests(unittest.TestCase):
         self.assertIn("['created_at']", indexed)
 
         self.assertEqual(schema, _schema(generated))
+
+    def test_readme_adoption_recipes_reach_the_migrated_schema(self) -> None:
+        # Each recipe in the README's "Adopting an Existing Database": the schema
+        # the database already has, the --fake target, then a normal migrate.
+        fresh = self.dir / "fresh.sqlite3"
+        asyncio.run(_migrate(fresh))
+        recipes = {
+            "before migrations": ("models.0001_initial", "0001_initial"),
+            "scoped history, no region": (
+                "models.0002_token_family_and_client_history",
+                "0002_token_family_and_client_history",
+            ),
+            "current models": (None, None),
+        }
+        for label, (built_to, fake_to) in recipes.items():
+            with self.subTest(label):
+                path = self.dir / f"adopt-{label.replace(' ', '-')}.sqlite3"
+                if built_to is None:
+                    asyncio.run(_generate_schemas(path))
+                else:
+                    asyncio.run(_migrate(path, target=built_to))
+                    _forget_migrations(path)
+                asyncio.run(_migrate(path, target=fake_to and f"models.{fake_to}", fake=True))
+                asyncio.run(_migrate(path))
+                self.assertEqual(_schema(path), _schema(fresh))
 
     def test_models_have_no_changes_missing_a_migration(self) -> None:
         async def detect() -> list[str]:
@@ -146,8 +184,10 @@ class MigrationTests(unittest.TestCase):
             [("t1", None)],
         )
         self.assertEqual(
-            con.execute("SELECT city, client_id FROM weather_lookups").fetchall(),
-            [("Nairobi", None)],
+            con.execute(
+                "SELECT city, client_id, location_region FROM weather_lookups"
+            ).fetchall(),
+            [("Nairobi", None, None)],
         )
         con.close()
 
@@ -155,6 +195,30 @@ class MigrationTests(unittest.TestCase):
         self.assertEqual(_schema(path), baseline)
         con = sqlite3.connect(path)
         self.assertEqual(con.execute("SELECT count(*) FROM weather_lookups").fetchone(), (1,))
+        con.close()
+
+    def test_downgrade_of_region_keeps_rows_and_indexes(self) -> None:
+        previous = "models.0002_token_family_and_client_history"
+        path = self.dir / "region.sqlite3"
+        asyncio.run(_migrate(path, target=previous))
+        before = _schema(path)
+        asyncio.run(_migrate(path))
+        con = sqlite3.connect(path)
+        with con:
+            con.execute(
+                "INSERT INTO weather_lookups (city, country_code, location_name, "
+                "location_region, latitude, longitude, weather, created_at) VALUES "
+                "('Springfield', 'US', 'Springfield', 'Missouri', 0, 0, '{}', '2026-01-01')"
+            )
+        con.close()
+
+        asyncio.run(_migrate(path, target=previous))
+        # A table rebuild on SQLite would drop weather_lookups' indexes.
+        self.assertEqual(_schema(path), before)
+        con = sqlite3.connect(path)
+        self.assertEqual(
+            con.execute("SELECT city FROM weather_lookups").fetchall(), [("Springfield",)]
+        )
         con.close()
 
 
@@ -175,8 +239,19 @@ class StartupMigrationCheckTests(unittest.TestCase):
 
     def test_startup_fails_while_migrations_are_pending(self) -> None:
         for target, pending in [
-            (None, ["models.0001_initial", "models.0002_token_family_and_client_history"]),
-            (BASELINE, ["models.0002_token_family_and_client_history"]),
+            (
+                None,
+                [
+                    "models.0001_initial",
+                    "models.0002_token_family_and_client_history",
+                    "models.0003_location_region",
+                ],
+            ),
+            (
+                BASELINE,
+                ["models.0002_token_family_and_client_history", "models.0003_location_region"],
+            ),
+            ("models.0002_token_family_and_client_history", ["models.0003_location_region"]),
         ]:
             with self.subTest(migrated_to=target):
                 if target is not None:

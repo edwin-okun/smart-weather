@@ -21,6 +21,8 @@ class WeatherLookup(Model):
     city = fields.CharField(max_length=120)
     country_code = fields.CharField(max_length=2)
     location_name = fields.CharField(max_length=120)
+    # Geocoding admin1 (state/province); null for rows saved before it was stored.
+    location_region = fields.CharField(max_length=120, null=True)
     location_country = fields.CharField(max_length=120, null=True)
     location_timezone = fields.CharField(max_length=120, null=True)
     latitude = fields.FloatField()
