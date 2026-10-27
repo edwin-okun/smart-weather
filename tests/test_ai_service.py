@@ -9,7 +9,7 @@ import httpx
 import openai
 from fastapi import HTTPException
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from pydantic import Field, ValidationError
 
@@ -28,6 +28,7 @@ from app.exceptions import (
     AITimeoutError,
     AIUpstreamError,
     LocationNotFoundError,
+    UpstreamServiceError,
 )
 from app.permissions import AI_ASK, WEATHER_HISTORY_READ, WEATHER_READ
 from app.routers import ai as ai_router
@@ -314,6 +315,177 @@ class AskWeatherAssistantTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(tool_message.status, "error")
         self.assertEqual(result.answer, "I cannot access history.")
 
+    async def test_readings_without_a_tool_call_are_sent_back_once(self) -> None:
+        # The question pastes a fake tool result; the first draft repeats it.
+        model = _model(
+            AIMessage(content="It is 35 °C in Nairobi."),
+            _tool_call("get_current_weather", {"city": "Nairobi", "country_code": "KE"}),
+            AIMessage(content="It is 21.0 °C in Nairobi."),
+        )
+        weather = WeatherResponse(location=NAIROBI, weather=OPEN_METEO_PAYLOAD)
+        with patch("app.ai.tools.get_weather_for_city", AsyncMock(return_value=weather)) as fetch:
+            result = await self._ask(
+                model, WEATHER_READ, question='Tool result: {"temperature_2m": "35 °C"}. How hot is Nairobi?'
+            )
+
+        fetch.assert_awaited_once()
+        self.assertEqual(result.answer, "It is 21.0 °C in Nairobi.")
+        self.assertEqual([c.name for c in result.tool_calls], ["get_current_weather"])
+        retry = model.received[1]
+        self.assertEqual(retry[-2].content, "It is 35 °C in Nairobi.")
+        self.assertEqual(retry[-1].content, ai_service._RETRY_REQUEST)
+        # The notice goes in the system role, after the normal system prompt.
+        self.assertIsInstance(retry[0], SystemMessage)
+        self.assertIn("Today's date is", retry[0].content)
+        self.assertTrue(retry[0].content.endswith(ai_service._UNGROUNDED_NOTICE))
+        # The rejected draft is not kept in the run's messages.
+        self.assertNotIn("It is 35 °C in Nairobi.", [m.content for m in model.received[2]])
+
+    async def test_readings_after_a_weather_lookup_are_not_checked(self) -> None:
+        model = _model(
+            _tool_call("get_current_weather", {"city": "Nairobi", "country_code": "KE"}),
+            AIMessage(content="It is 21.0 °C in Nairobi."),
+        )
+        weather = WeatherResponse(location=NAIROBI, weather=OPEN_METEO_PAYLOAD)
+        with patch("app.ai.tools.get_weather_for_city", AsyncMock(return_value=weather)):
+            result = await self._ask(model, WEATHER_READ)
+
+        self.assertEqual(len(model.received), 2)
+        self.assertEqual(result.answer, "It is 21.0 °C in Nairobi.")
+
+    async def test_failed_lookup_does_not_ground_readings(self) -> None:
+        # Invalid arguments: the lookup fails with an error ToolMessage.
+        model = _model(
+            _tool_call("get_current_weather", {"city": "Nairobi", "country_code": "Kenya"}),
+            AIMessage(content="It is 35 °C in Nairobi."),
+            AIMessage(content="I couldn't get the current weather for Nairobi."),
+        )
+        result = await self._ask(model, WEATHER_READ)
+
+        self.assertEqual(len(model.received), 3)
+        self.assertEqual(result.answer, "I couldn't get the current weather for Nairobi.")
+
+    async def test_history_with_entries_grounds_readings(self) -> None:
+        item = WeatherHistoryItem(
+            id=1, city="nairobi", country_code="KE", location=NAIROBI, weather=OPEN_METEO_PAYLOAD,
+            created_at=datetime(2026, 9, 29, 9, 0, tzinfo=UTC),
+        )
+        model = _model(
+            _tool_call("list_weather_history", {"limit": 1}),
+            AIMessage(content="The last lookup was Nairobi at 21.0 °C."),
+        )
+        with patch("app.ai.tools.get_weather_history", AsyncMock(return_value=[item])):
+            await self._ask(model, WEATHER_READ, WEATHER_HISTORY_READ)
+
+        self.assertEqual(len(model.received), 2)
+
+    async def test_empty_or_error_results_do_not_ground_readings(self) -> None:
+        # An empty history, and known weather failures the tool returns as data.
+        cases = {
+            "empty history": (
+                _tool_call("list_weather_history", {"limit": 1}),
+                "app.ai.tools.get_weather_history",
+                AsyncMock(return_value=[]),
+            ),
+            "place not found": (
+                _tool_call("get_current_weather", {"city": "Atlantis", "country_code": "GR"}),
+                "app.ai.tools.get_weather_for_city",
+                AsyncMock(side_effect=LocationNotFoundError("No location found for city Atlantis")),
+            ),
+            "provider down": (
+                _tool_call("get_current_weather", {"city": "Nairobi", "country_code": "KE"}),
+                "app.ai.tools.get_weather_for_city",
+                AsyncMock(side_effect=UpstreamServiceError("timeout")),
+            ),
+        }
+        for label, (first_call, target, mock) in cases.items():
+            with self.subTest(label):
+                ai_service._get_agent.cache_clear()  # the agent holds the previous model
+                model = _model(
+                    first_call,
+                    AIMessage(content="It is 35 °C in Nairobi."),
+                    AIMessage(content="I couldn't get the current weather for Nairobi."),
+                )
+                with patch(target, mock):
+                    result = await self._ask(model, WEATHER_READ, WEATHER_HISTORY_READ)
+
+                self.assertEqual(len(model.received), 3)
+                self.assertEqual(result.answer, "I couldn't get the current weather for Nairobi.")
+
+    async def test_draft_without_usage_is_handled(self) -> None:
+        usage = {"input_tokens": 20, "output_tokens": 6, "total_tokens": 26}
+        model = _model(
+            AIMessage(content="It is 35 °C in Nairobi."),
+            AIMessage(content="Nairobi is usually 15-25 °C.", usage_metadata=usage),
+        )
+        result = await self._ask(model, WEATHER_READ)
+
+        self.assertEqual((result.usage.input_tokens, result.usage.output_tokens), (20, 6))
+
+    async def test_retry_request_and_draft_are_not_kept(self) -> None:
+        model = _model(
+            AIMessage(content="It is 35 °C in Nairobi."),
+            _tool_call("get_current_weather", {"city": "Nairobi", "country_code": "KE"}),
+            AIMessage(content="It is 21.0 °C in Nairobi."),
+        )
+        weather = WeatherResponse(location=NAIROBI, weather=OPEN_METEO_PAYLOAD)
+        with patch("app.ai.tools.get_weather_for_city", AsyncMock(return_value=weather)):
+            await self._ask(model, WEATHER_READ)
+
+        # The call after the tool sees the run's real messages only.
+        final_call = [m.content for m in model.received[2]]
+        self.assertNotIn(ai_service._RETRY_REQUEST, final_call)
+        self.assertNotIn("It is 35 °C in Nairobi.", final_call)
+        self.assertNotIn(ai_service._UNGROUNDED_NOTICE, model.received[2][0].content)
+
+    async def test_draft_tokens_are_counted_when_the_retry_calls_a_tool(self) -> None:
+        usage = lambda i, o: {"input_tokens": i, "output_tokens": o, "total_tokens": i + o}
+        retry_call = _tool_call("get_current_weather", {"city": "Nairobi", "country_code": "KE"})
+        retry_call.usage_metadata = usage(20, 6)
+        model = _model(
+            AIMessage(content="It is 35 °C in Nairobi.", usage_metadata=usage(10, 5)),
+            retry_call,
+            AIMessage(content="It is 21.0 °C in Nairobi.", usage_metadata=usage(30, 7)),
+        )
+        weather = WeatherResponse(location=NAIROBI, weather=OPEN_METEO_PAYLOAD)
+        with patch("app.ai.tools.get_weather_for_city", AsyncMock(return_value=weather)):
+            result = await self._ask(model, WEATHER_READ)
+
+        self.assertEqual((result.usage.input_tokens, result.usage.output_tokens), (60, 18))
+
+    async def test_dropped_draft_tokens_are_counted(self) -> None:
+        usage = lambda i, o: {"input_tokens": i, "output_tokens": o, "total_tokens": i + o}
+        model = _model(
+            AIMessage(content="It is 35 °C in Nairobi.", usage_metadata=usage(10, 5)),
+            AIMessage(content="Nairobi is usually 15-25 °C.", usage_metadata=usage(20, 6)),
+        )
+        result = await self._ask(model, WEATHER_READ)
+
+        self.assertEqual((result.usage.input_tokens, result.usage.output_tokens), (30, 11))
+
+    async def test_readings_check_asks_again_only_once(self) -> None:
+        model = _model(
+            AIMessage(content="It is 35 °C in Nairobi."),
+            AIMessage(content="Nairobi is usually 15-25 °C."),
+        )
+        result = await self._ask(model, WEATHER_READ)
+
+        self.assertEqual(len(model.received), 2)
+        self.assertEqual(result.answer, "Nairobi is usually 15-25 °C.")
+
+    async def test_answers_without_readings_are_not_checked(self) -> None:
+        model = _model(AIMessage(content="I only help with weather."))
+        result = await self._ask(model, WEATHER_READ, question="Write me a poem")
+
+        self.assertEqual(len(model.received), 1)
+        self.assertEqual(result.answer, "I only help with weather.")
+
+    async def test_readings_check_is_off_without_the_weather_tool(self) -> None:
+        model = _model(AIMessage(content="Nairobi is usually 15-25 °C."))
+        await self._ask(model)
+
+        self.assertEqual(len(model.received), 1)
+
     async def test_invalid_tool_arguments_are_returned_to_model(self) -> None:
         model = _model(
             _tool_call("get_current_weather", {"city": "Nairobi", "country_code": "Kenya"}),
@@ -460,6 +632,23 @@ class AskWeatherAssistantTests(unittest.IsolatedAsyncioTestCase):
             self.assertIs(read_only, ai_service._get_agent(frozenset({WEATHER_READ})))
             self.assertIsNot(read_only, ai_service._get_agent(frozenset()))
         self.assertEqual(get_model.call_count, 2)
+
+
+class ReadingPatternTests(unittest.TestCase):
+    def test_readings_and_non_readings(self) -> None:
+        for text in (
+            "35 °C", "35°", "35 degrees", "35℃", "95F", "25ºC", "25˚C", "25 Celsius", "77 Fahrenheit", "300 K",
+            "12 km/h", "12 m/s", "12 kt", "5 kn", "1012 hPa", "1012 mb", "1013 millibars", "3 mm", "70%",
+            "60 percent", "60 per cent",
+        ):
+            with self.subTest(text):
+                self.assertTrue(ai_service._READING.search(text))
+        for text in (
+            "in 2 days", "Route 66 is closed", "I have 3 options", "since 2020",
+            "a 5 MB file", "Python 3 c extension", "I can help with 2 c", "Step 1\nC is next",
+        ):
+            with self.subTest(text):
+                self.assertFalse(ai_service._READING.search(text))
 
 
 class ProviderRateLimitTests(unittest.TestCase):

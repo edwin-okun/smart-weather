@@ -332,7 +332,12 @@ class RunCaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.usage, {"input_tokens": 30, "output_tokens": 9})
 
     async def test_wrong_country_is_not_found_and_fails(self) -> None:
-        model = _model(_tool_call("get_current_weather", {"city": "San Francisco"}), AIMessage(content="It is 16 °C."))
+        # A reading after a not-found result is asked for once more; this model repeats it.
+        model = _model(
+            _tool_call("get_current_weather", {"city": "San Francisco"}),
+            AIMessage(content="It is 16 °C."),
+            AIMessage(content="It is 16 °C."),
+        )
         result = await self._run_case(model)
 
         self.assertEqual(result.status, "fail")
